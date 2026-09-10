@@ -1,0 +1,156 @@
+# AdaptiveNGram/1
+# pentatonic_12: gong/shang/jue/zhi/yu = 0/2/4/7/9 (relative semitones).
+# Hand-designed melodic biases; NOT corpus frequencies or learned probabilities.
+# Format: role n pc0,pc1,... bias ; positive = reward, negative = penalty.
+# The runtime SUMS all matching n=2..5 terms and subtracts them from candidate cost.
+# Pitch-class-only table: octave/register/direction are handled by melodic rules.
+# No transposition to the other 7 chromatic pitch classes; only cyclic pentatonic patterns.
+# Source for pitch-system structure (not numerical weights):
+# https://mtosmt.org/issues/mto.24.30.1/mto.24.30.1.lam.html
+
+# Lead 2-grams: adjacent pentatonic positions, including the two 3-semitone gaps.
+lead	2	0,2	0.12
+lead	2	2,0	0.20
+lead	2	2,4	0.14
+lead	2	4,2	0.16
+lead	2	4,7	0.16
+lead	2	7,4	0.16
+lead	2	7,9	0.12
+lead	2	9,7	0.18
+lead	2	9,0	0.14
+lead	2	0,9	0.12
+
+# Lead 3-grams: short stepwise runs, with modest extra support for returning to gong.
+lead	3	0,2,4	0.10
+lead	3	2,4,7	0.10
+lead	3	4,7,9	0.10
+lead	3	7,9,0	0.16
+lead	3	9,0,2	0.10
+lead	3	0,9,7	0.10
+lead	3	2,0,9	0.10
+lead	3	4,2,0	0.16
+lead	3	7,4,2	0.10
+lead	3	9,7,4	0.10
+
+# Lead 3-grams: gentle neighboring-tone turns; do not prohibit short repetition.
+lead	3	0,9,0	0.03
+lead	3	0,2,0	0.03
+lead	3	2,0,2	0.03
+lead	3	2,4,2	0.03
+lead	3	4,2,4	0.03
+lead	3	4,7,4	0.03
+lead	3	7,4,7	0.03
+lead	3	7,9,7	0.03
+lead	3	9,7,9	0.03
+lead	3	9,0,9	0.03
+
+# Lead 3-grams: sparse gong/zhi landing fragments, not a compulsory cadence rule.
+lead	3	7,2,0	0.10
+lead	3	9,2,0	0.08
+lead	3	2,9,0	0.08
+lead	3	4,9,7	0.08
+
+# Lead repeated-pitch runs; two repeated notes are allowed without n-gram penalty.
+lead	3	0,0,0	-0.10
+lead	4	0,0,0,0	-0.35
+lead	5	0,0,0,0,0	-0.85
+lead	3	2,2,2	-0.10
+lead	4	2,2,2,2	-0.35
+lead	5	2,2,2,2,2	-0.85
+lead	3	4,4,4	-0.10
+lead	4	4,4,4,4	-0.35
+lead	5	4,4,4,4,4	-0.85
+lead	3	7,7,7	-0.10
+lead	4	7,7,7,7	-0.35
+lead	5	7,7,7,7,7	-0.85
+lead	3	9,9,9	-0.10
+lead	4	9,9,9,9	-0.35
+lead	5	9,9,9,9,9	-0.85
+
+# Lead excessive ABAB / ABABA loops; softer than the generic -0.4/-1.2 table.
+lead	4	0,2,0,2	-0.20
+lead	5	0,2,0,2,0	-0.65
+lead	4	0,4,0,4	-0.20
+lead	5	0,4,0,4,0	-0.65
+lead	4	0,7,0,7	-0.20
+lead	5	0,7,0,7,0	-0.65
+lead	4	0,9,0,9	-0.20
+lead	5	0,9,0,9,0	-0.65
+lead	4	2,0,2,0	-0.20
+lead	5	2,0,2,0,2	-0.65
+lead	4	2,4,2,4	-0.20
+lead	5	2,4,2,4,2	-0.65
+lead	4	2,7,2,7	-0.20
+lead	5	2,7,2,7,2	-0.65
+lead	4	2,9,2,9	-0.20
+lead	5	2,9,2,9,2	-0.65
+lead	4	4,0,4,0	-0.20
+lead	5	4,0,4,0,4	-0.65
+lead	4	4,2,4,2	-0.20
+lead	5	4,2,4,2,4	-0.65
+lead	4	4,7,4,7	-0.20
+lead	5	4,7,4,7,4	-0.65
+lead	4	4,9,4,9	-0.20
+lead	5	4,9,4,9,4	-0.65
+lead	4	7,0,7,0	-0.20
+lead	5	7,0,7,0,7	-0.65
+lead	4	7,2,7,2	-0.20
+lead	5	7,2,7,2,7	-0.65
+lead	4	7,4,7,4	-0.20
+lead	5	7,4,7,4,7	-0.65
+lead	4	7,9,7,9	-0.20
+lead	5	7,9,7,9,7	-0.65
+lead	4	9,0,9,0	-0.20
+lead	5	9,0,9,0,9	-0.65
+lead	4	9,2,9,2	-0.20
+lead	5	9,2,9,2,9	-0.65
+lead	4	9,4,9,4	-0.20
+lead	5	9,4,9,4,9	-0.65
+lead	4	9,7,9,7	-0.20
+lead	5	9,7,9,7,9	-0.65
+
+# Lead 4-grams: limited complete scalar fragments; rewards add to shorter n-grams.
+lead	4	0,2,4,7	0.04
+lead	4	2,4,7,9	0.04
+lead	4	4,7,9,0	0.08
+lead	4	7,9,0,2	0.04
+lead	4	9,0,2,4	0.04
+lead	4	0,9,7,4	0.04
+lead	4	2,0,9,7	0.04
+lead	4	4,2,0,9	0.04
+lead	4	7,4,2,0	0.08
+lead	4	9,7,4,2	0.04
+
+# Bass 2/3-grams: light fourth/fifth support, no hard interval requirements.
+bass	2	0,7	0.10
+bass	2	7,0	0.14
+bass	2	0,0	0.03
+bass	2	2,9	0.06
+bass	2	9,2	0.06
+bass	2	4,9	0.05
+bass	2	9,4	0.05
+bass	3	2,7,0	0.08
+bass	3	9,7,0	0.06
+
+# Bass excessive two-note looping.
+bass	5	0,2,0,2,0	-0.25
+bass	5	0,4,0,4,0	-0.25
+bass	5	0,7,0,7,0	-0.25
+bass	5	0,9,0,9,0	-0.25
+bass	5	2,0,2,0,2	-0.25
+bass	5	2,4,2,4,2	-0.25
+bass	5	2,7,2,7,2	-0.25
+bass	5	2,9,2,9,2	-0.25
+bass	5	4,0,4,0,4	-0.25
+bass	5	4,2,4,2,4	-0.25
+bass	5	4,7,4,7,4	-0.25
+bass	5	4,9,4,9,4	-0.25
+bass	5	7,0,7,0,7	-0.25
+bass	5	7,2,7,2,7	-0.25
+bass	5	7,4,7,4,7	-0.25
+bass	5	7,9,7,9,7	-0.25
+bass	5	9,0,9,0,9	-0.25
+bass	5	9,2,9,2,9	-0.25
+bass	5	9,4,9,4,9	-0.25
+bass	5	9,7,9,7,9	-0.25
+

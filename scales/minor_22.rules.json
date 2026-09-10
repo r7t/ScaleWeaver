@@ -1,0 +1,80 @@
+{
+  "format": "CompositionRules/1",
+  "scale_id": "minor_22",
+  "wolf_intervals": [],
+  "wolf_absolute_intervals": [],
+  "cleanup": {
+    "degree_distances": [],
+    "step_distances": [],
+    "passes": 8,
+    "soft_penalty": 0.72
+  },
+  "melody": {
+    "enabled": true,
+    "phrase_bars": 8,
+    "phrase_shapes": {"arch": 0.48, "rise": 0.21, "fall": 0.21, "valley": 0.1},
+    "bar_shapes": {"arch": 0.42, "rise": 0.25, "fall": 0.25, "valley": 0.08},
+    "phrase_amplitudes": [2, 2, 3],
+    "bar_amplitudes": [1, 2, 2],
+    "guide_weight": 0.38,
+    "direction_reward": 0.18,
+    "direction_penalty": 0.22,
+    "leap_recovery_threshold": 3,
+    "leap_recovery_reward": 0.48,
+    "same_direction_large_leap_penalty": 0.36,
+    "centre_jitter_degrees": 1,
+    "register_point_weight": 0.55,
+    "register_high_multiplier": 2.6,
+    "register_low_multiplier": 0.65,
+    "register_power": 2.2,
+    "register_centroid_feedback": 1.2,
+    "register_centroid_window": 32
+  },
+  "harmony": {
+    "pitch_roles": {
+      "tonic": [0],
+      "dominant": [13],
+      "subdominant": [9],
+      "other": [4, 5, 14, 18]
+    },
+    "stability": {
+      "stable": [0, 5, 13],
+      "unstable": [4, 9, 14, 18]
+    },
+    "chord_progression": {
+      "degrees": [4, 5, 3, 6, 2, 5, 1],
+      "bars_per_chord": 1
+    }
+  },
+  "metadata": {
+    "generator": {
+      "lead_pc_target_prior": 18.0,
+      "lead_pc_target_gain": 4.2,
+      "lead_pc_count_gain": 0.66,
+      "lead_motion": {
+        "normal_flow_octaves": 0.3,
+        "medium_leap_octaves": 0.55,
+        "strong_recovery_octaves": 0.55,
+        "preferred_max_leap_octaves": 0.72,
+        "distance_decay_per_octave": 2.8,
+        "distance_flat_octaves": 0.18,
+        "repeated_note_weight": 0.3,
+        "distance_min_weight": 0.04,
+        "leap_target_rate": 0.18,
+        "leap_min_octaves": 0.4,
+        "leap_balance_gain": 9.0,
+        "large_leap_target_rate": 0.04,
+        "large_leap_min_octaves": 0.7,
+        "large_leap_balance_gain": 35.0,
+        "leap_balance_window": 24,
+        "leap_balance_prior": 8.0,
+        "structural_leap_multiplier": 1.25,
+        "short_note_leap_multiplier": 0.25,
+        "sixteenth_flow_profile": [[0.1, 0.24], [0.2, 0.2], [0.3, 0.13]]
+      }
+    }
+  },
+  "runtime": {
+    "COUNTERPOINT_LOOKAHEAD_MAX_OCTAVE_FAMILY_PAIRS": 1
+  }
+}

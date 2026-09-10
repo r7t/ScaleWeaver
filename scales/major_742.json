@@ -1,0 +1,10 @@
+{
+  "format": "ScaleDefinition/1",
+  "id": "major_742",
+  "name": "742-EDO 8-note scale",
+  "edo": 742,
+  "pcs": [0, 48, 165, 241, 358, 406, 549, 599],
+  "names": ["1", "2", "3", "4", "5", "6", "7", "8"],
+  "base_note": "E4",
+  "base_freq_hz": 320.0
+}

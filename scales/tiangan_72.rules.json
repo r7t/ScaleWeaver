@@ -1,0 +1,375 @@
+{
+  "format": "CompositionRules/1",
+  "scale_id": "tiangan_72",
+  "voice_ranges": {
+    "bass": [
+      -130,
+      7
+    ],
+    "inner": [
+      -72,
+      95
+    ],
+    "counter": [
+      -42,
+      151
+    ],
+    "lead": [
+      -7,
+      151
+    ]
+  },
+  "wolf_intervals": [
+    44
+  ],
+  "cleanup": {
+    "degree_distances": [
+      11
+    ],
+    "step_distances": [
+      67
+    ],
+    "passes": 8,
+    "max_shift_degrees": {
+      "lead": 4,
+      "counter": 5,
+      "inner": 6,
+      "bass": 6
+    },
+    "soft_penalty": 0.72
+  },
+  "melody": {
+    "enabled": true,
+    "phrase_bars": 8,
+    "phrase_shapes": {
+      "arch": 0.46,
+      "rise": 0.22,
+      "fall": 0.22,
+      "valley": 0.1
+    },
+    "bar_shapes": {
+      "arch": 0.42,
+      "rise": 0.25,
+      "fall": 0.25,
+      "valley": 0.08
+    },
+    "phrase_amplitudes": [
+      2,
+      3,
+      4
+    ],
+    "bar_amplitudes": [
+      2,
+      2,
+      3
+    ],
+    "guide_weight": 0.36,
+    "direction_reward": 0.17,
+    "direction_penalty": 0.21,
+    "leap_recovery_threshold": 5,
+    "leap_recovery_reward": 0.48,
+    "same_direction_large_leap_penalty": 0.36,
+    "centre_jitter_degrees": 1,
+    "register_point_weight": 0.55,
+    "register_high_multiplier": 2.6,
+    "register_low_multiplier": 0.65,
+    "register_power": 2.2,
+    "register_centroid_feedback": 1.2,
+    "register_centroid_window": 32
+  },
+  "cse_wide_bounds": [
+    -216,
+    216
+  ],
+  "cse_inner_bounds": [
+    -72,
+    160
+  ],
+  "harmony": {
+    "pitch_roles": {
+      "tonic": [
+        0
+      ],
+      "dominant": [
+        42
+      ],
+      "subdominant": [
+        30
+      ],
+      "other": [
+        7,
+        16,
+        23,
+        35,
+        49,
+        58,
+        65
+      ]
+    },
+    "stability": {
+      "stable": [
+        0,
+        23,
+        42
+      ],
+      "unstable": [
+        7,
+        16,
+        30,
+        35,
+        49,
+        58,
+        65
+      ]
+    },
+    "chord_codes": {
+      "0": {"chord_id": "P3_036", "name": "甲丁庚", "ratio": "3:4:5"},
+      "1": {"chord_id": "P3_147", "name": "乙戊辛", "ratio": "3:4:5"},
+      "2": {"chord_id": "P3_258", "name": "丙己壬", "ratio": "10:12:15"},
+      "3": {"chord_id": "P3_369", "name": "丁庚癸", "ratio": "10:12:15"},
+      "4": {"chord_id": "P3_047", "name": "戊辛甲", "ratio": "10:12:15"},
+      "9": {"chord_id": "P3_259", "name": "癸丙己", "ratio": "3:4:5"},
+      "a": {"chord_id": "P3_024", "name": "戊甲丙", "ratio": "4:6:7"},
+      "b": {"chord_id": "P3_068", "name": "甲庚壬", "ratio": "4:6:7"},
+      "c": {"chord_id": "P3_179", "name": "乙辛癸", "ratio": "4:6:7"},
+      "d": {"chord_id": "P3_026", "name": "甲丙庚", "ratio": "6:7:9"},
+      "e": {"chord_id": "P3_137", "name": "乙丁辛", "ratio": "6:7:9"},
+      "f": {"chord_id": "P3_028", "name": "甲丙壬", "ratio": "12:14:21"},
+      "g": {"chord_id": "P3_139", "name": "乙丁癸", "ratio": "12:14:21"},
+      "h": {"chord_id": "P3_579", "name": "辛癸己", "ratio": "12:14:21"},
+      "i": {"chord_id": "P3_038", "name": "甲丁壬", "ratio": "4:5:7"},
+      "j": {"chord_id": "P3_057", "name": "辛甲己", "ratio": "4:5:7"},
+      "k": {"chord_id": "P3_149", "name": "乙戊癸", "ratio": "4:5:7"},
+      "l": {"chord_id": "P3_046", "name": "甲戊庚", "ratio": "6:8:9"},
+      "m": {"chord_id": "P3_359", "name": "癸丁己", "ratio": "6:8:9"},
+      "n": {"chord_id": "P3_246", "name": "丙戊庚", "ratio": "7:8:9"},
+      "o": {"chord_id": "P3_268", "name": "丙庚壬", "ratio": "14:18:21"},
+      "p": {"chord_id": "P3_379", "name": "丁辛癸", "ratio": "14:18:21"},
+      "q": {"chord_id": "P3_368", "name": "丁庚壬", "ratio": "5:6:7"},
+      "r": {"chord_id": "P3_479", "name": "戊辛癸", "ratio": "5:6:7"},
+      "s": {"chord_id": "P4_0147", "name": "乙戊辛甲", "ratio": "8:10:12:15"},
+      "t": {"chord_id": "P4_0369", "name": "甲丁庚癸", "ratio": "8:10:12:15"},
+      "u": {"chord_id": "P4_2589", "name": "癸丙己壬", "ratio": "8:10:12:15"},
+      "v": {"chord_id": "P4_0246", "name": "甲丙戊庚", "ratio": "6:7:8:9"},
+      "w": {"chord_id": "P4_0268", "name": "甲丙庚壬", "ratio": "12:14:18:21"},
+      "x": {"chord_id": "P4_1379", "name": "乙丁辛癸", "ratio": "12:14:18:21"},
+      "y": {"chord_id": "P4_0368", "name": "甲丁庚壬", "ratio": "4:5:6:7"},
+      "z": {"chord_id": "P4_1479", "name": "乙戊辛癸", "ratio": "4:5:6:7"}
+    },
+    "tiangan_progression": {
+      "enabled": true,
+      "pitch_stability_order": [0, 30, 42, 16, 49, 7, 58, 23, 65, 35],
+      "pitch_function_weights": {
+        "0": {"T": 1.0},
+        "7": {"S": 1.0, "D": 0.35},
+        "16": {"T": 0.35},
+        "23": {"D": 1.0},
+        "30": {"S": 1.0, "T": 0.35},
+        "35": {},
+        "42": {"T": 1.0, "D": 0.35},
+        "49": {"S": 0.35},
+        "58": {"T": 0.35},
+        "65": {"D": 0.35}
+      },
+      "out_of_key_pitch_classes": [35],
+      "chord_pitch_class_prevalence": {
+        "35": {
+          "target_share": 0.15,
+          "base_log_weight_boost": 2.50,
+          "feedback_gain": 6.0,
+          "prior_duration": 16.0,
+          "excluded_boost_chord_ids": ["P3_359"]
+        }
+      },
+      "function_start_weights": {
+        "T": 0.76,
+        "S": 0.19,
+        "D": 0.05
+      },
+      "function_transition_weights": {
+        "T": {"T": 0.18, "S": 0.62, "D": 0.20},
+        "S": {"T": 0.10, "S": 0.18, "D": 0.72},
+        "D": {"T": 0.62, "S": 0.15, "D": 0.23}
+      },
+      "penultimate_function_weights": {
+        "T": 0.17,
+        "S": 0.15,
+        "D": 0.68
+      },
+      "final_function": "T",
+      "stability_curve": [0.68, 0.58, 0.46, 0.30, 0.22, 0.38, 0.58, 0.82],
+      "weights": {
+        "function_affinity": 4.5,
+        "stability_curve": 12.0,
+        "cse": 0.1,
+        "off_path_penalty": 6.0,
+        "out_of_key_penalty": 0.0,
+        "common_tone": 0.18,
+        "repeat_factor": 0.22
+      }
+    }
+  },
+  "metadata": {
+    "generator": {
+      "velocity": {
+        "bass": 0.6,
+        "inner": 0.6,
+        "counter": 0.6,
+        "lead": 0.6
+      },
+      "second_max_step": 9,
+      "lead_max_jump_degrees": 10,
+      "lead_distance_weights": {
+        "0": 0.3,
+        "1": 1.0,
+        "2": 0.94,
+        "3": 0.86,
+        "4": 0.56,
+        "5": 0.38,
+        "6": 0.18,
+        "7": 0.095,
+        "8": 0.045,
+        "9": 0.022,
+        "10": 0.011
+      },
+      "counterpoint_max_jump_degrees": {
+        "counter": 9,
+        "inner": 8,
+        "bass": 7
+      },
+      "counterpoint_role_centre_degree": {
+        "counter": 2,
+        "inner": -6,
+        "bass": -17
+      },
+      "counterpoint_effective_ranges": {
+        "counter": [
+          -42,
+          151
+        ],
+        "inner": [
+          -72,
+          95
+        ],
+        "bass": [
+          -216,
+          -49
+        ]
+      },
+      "lead_section_base_centres": {
+        "A": [
+          7,
+          8,
+          9,
+          10
+        ],
+        "B": [
+          9,
+          10,
+          11,
+          12
+        ]
+      },
+      "motif_degree_origin": 40,
+      "ratio_smooth_primes": [
+        2,
+        3,
+        5,
+        7,
+        11
+      ],
+      "realized_risk_pair_cost": 0.0,
+      "lead_motion": {
+        "normal_flow_octaves": 0.3,
+        "medium_leap_octaves": 0.5,
+        "strong_recovery_octaves": 0.5,
+        "preferred_max_leap_octaves": 0.5,
+        "distance_decay_per_octave": 5.5,
+        "distance_flat_octaves": 0.2,
+        "repeated_note_weight": 0.3,
+        "distance_min_weight": 0.01,
+        "sixteenth_flow_profile": [
+          [
+            0.1,
+            0.24
+          ],
+          [
+            0.2,
+            0.2
+          ],
+          [
+            0.3,
+            0.13
+          ]
+        ]
+      }
+    },
+    "harmony_style": {
+      "function_class_prior": {
+        "T": 0.3,
+        "S": 0.25,
+        "D": 0.25,
+        "C": 0.2
+      },
+      "function_transition_log_bias": {
+        "T": {
+          "T": -0.18,
+          "S": 0.78,
+          "D": -0.22,
+          "C": -0.06
+        },
+        "S": {
+          "T": -0.3,
+          "S": -0.16,
+          "D": 0.82,
+          "C": -0.05
+        },
+        "D": {
+          "T": 0.92,
+          "S": -0.34,
+          "D": -0.18,
+          "C": -0.04
+        },
+        "C": {
+          "T": 0.24,
+          "S": 0.12,
+          "D": 0.08,
+          "C": -0.14
+        }
+      },
+      "anchor": {
+        "cardinality": 3,
+        "required_all": [
+          0
+        ],
+        "required_any": [
+          16,
+          42
+        ]
+      }
+    }
+  },
+  "voicebank": {
+    "reference_text": {
+      "甲": "家",
+      "乙": "衣",
+      "丙": "冰",
+      "丁": "叮",
+      "戊": "屋",
+      "己": "鸡",
+      "庚": "耕",
+      "辛": "心",
+      "壬": "人",
+      "癸": "归"
+    }
+  },
+  "runtime": {
+    "COUNTERPOINT_LOOKAHEAD_MAX_OCTAVE_FAMILY_PAIRS": 1
+  },
+  "wolf_absolute_intervals": [
+    5,
+    7,
+    9,
+    28
+  ]
+}

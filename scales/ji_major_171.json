@@ -1,0 +1,26 @@
+{
+  "format": "ScaleDefinition/1",
+  "id": "ji_major_171",
+  "name": "5-limJI",
+  "edo": 171,
+  "pcs": [
+    0,
+    29,
+    55,
+    71,
+    100,
+    126,
+    155
+  ],
+  "names": [
+    "1",
+    "2",
+    "3",
+    "4",
+    "5",
+    "6",
+    "7"
+  ],
+  "base_note": "E4",
+  "base_freq_hz": 320.0
+}

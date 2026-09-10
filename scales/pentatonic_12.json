@@ -1,0 +1,22 @@
+{
+  "format": "ScaleDefinition/1",
+  "id": "pentatonic_12",
+  "name": "五声宫调式（12-EDO）",
+  "edo": 12,
+  "pcs": [
+    0,
+    2,
+    4,
+    7,
+    9
+  ],
+  "names": [
+    "宫",
+    "商",
+    "角",
+    "徵",
+    "羽"
+  ],
+  "base_note": "E4",
+  "base_freq_hz": 320.0
+}

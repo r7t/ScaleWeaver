@@ -1,0 +1,10 @@
+{
+  "format": "ScaleDefinition/1",
+  "id": "minor_22",
+  "name": "22-EDO natural minor",
+  "edo": 22,
+  "pcs": [0, 4, 5, 9, 13, 14, 18],
+  "names": ["1", "2", "b3", "4", "5", "b6", "b7"],
+  "base_note": "E4",
+  "base_freq_hz": 320.0
+}

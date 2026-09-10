@@ -1,0 +1,10 @@
+{
+  "format": "ScaleDefinition/1",
+  "id": "major_571",
+  "name": "571-EDO 8-note scale",
+  "edo": 571,
+  "pcs": [0, 37, 127, 185, 275, 312, 423, 460],
+  "names": ["1", "2", "3", "4", "5", "6", "7", "8"],
+  "base_note": "E4",
+  "base_freq_hz": 320.0
+}

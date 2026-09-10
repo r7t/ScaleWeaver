@@ -1,0 +1,201 @@
+{
+  "format": "CompositionRules/1",
+  "scale_id": "pentatonic_12",
+  "wolf_intervals": [],
+  "cleanup": {
+    "degree_distances": [],
+    "step_distances": [],
+    "passes": 0,
+    "soft_penalty": 0.0
+  },
+  "melody": {
+    "enabled": true,
+    "phrase_bars": 8,
+    "phrase_shapes": {
+      "arch": 0.46,
+      "rise": 0.2,
+      "fall": 0.24,
+      "valley": 0.1
+    },
+    "bar_shapes": {
+      "arch": 0.38,
+      "rise": 0.24,
+      "fall": 0.28,
+      "valley": 0.1
+    },
+    "phrase_amplitudes": [
+      2,
+      2,
+      3
+    ],
+    "bar_amplitudes": [
+      1,
+      1,
+      2
+    ],
+    "guide_weight": 0.38,
+    "direction_reward": 0.18,
+    "direction_penalty": 0.22,
+    "leap_recovery_threshold": 3,
+    "leap_recovery_reward": 0.48,
+    "same_direction_large_leap_penalty": 0.36,
+    "centre_jitter_degrees": 1,
+    "register_point_weight": 0.55,
+    "register_high_multiplier": 2.6,
+    "register_low_multiplier": 0.65,
+    "register_power": 2.2,
+    "register_centroid_feedback": 1.2,
+    "register_centroid_window": 32
+  },
+  "harmony": {
+    "pitch_roles": {
+      "tonic": [
+        0
+      ],
+      "dominant": [
+        7
+      ],
+      "subdominant": [],
+      "other": [
+        2,
+        4,
+        9
+      ]
+    },
+    "stability": {
+      "stable": [
+        0,
+        7
+      ],
+      "unstable": [
+        2,
+        4,
+        9
+      ]
+    }
+  },
+  "metadata": {
+    "generator": {
+      "lead_pc_target_prior": 16.0,
+      "lead_pc_target_gain": 3.2,
+      "lead_pc_count_gain": 0.5,
+      "lead_motion": {
+        "normal_flow_octaves": 0.4,
+        "medium_leap_octaves": 0.6,
+        "strong_recovery_octaves": 0.6,
+        "preferred_max_leap_octaves": 0.6,
+        "distance_decay_per_octave": 5.5,
+        "distance_flat_octaves": 0.2,
+        "repeated_note_weight": 0.4,
+        "distance_min_weight": 0.01,
+        "sixteenth_flow_profile": [
+          [
+            0.1,
+            0.24
+          ],
+          [
+            0.2,
+            0.2
+          ],
+          [
+            0.3,
+            0.13
+          ]
+        ]
+      },
+      "second_max_step": 2,
+      "lead_max_jump_degrees": 4,
+      "counterpoint_max_jump_degrees": {
+        "counter": 4,
+        "inner": 3,
+        "bass": 3
+      },
+      "ratio_smooth_primes": [
+        2,
+        3
+      ]
+    },
+    "harmony_style": {
+      "function_class_prior": {
+        "T": 0.5,
+        "S": 0.0,
+        "D": 0.25,
+        "C": 0.25
+      },
+      "anchor": {
+        "cardinality": 3,
+        "required_all": [
+          0,
+          7
+        ],
+        "required_any": [
+          2,
+          4,
+          9
+        ]
+      },
+      "function_transition_log_bias": {
+        "T": {
+          "T": 0.08,
+          "S": 0.0,
+          "D": 0.0,
+          "C": 0.0
+        },
+        "S": {
+          "T": 0.08,
+          "S": 0.0,
+          "D": 0.0,
+          "C": 0.0
+        },
+        "D": {
+          "T": 0.08,
+          "S": 0.0,
+          "D": 0.0,
+          "C": 0.0
+        },
+        "C": {
+          "T": 0.08,
+          "S": 0.0,
+          "D": 0.0,
+          "C": 0.0
+        }
+      }
+    }
+  },
+  "runtime": {
+    "COUNTERPOINT_LOOKAHEAD_MAX_OCTAVE_FAMILY_PAIRS": 1
+  },
+  "voice_ranges": {
+    "bass": [
+      -24,
+      -5
+    ],
+    "inner": [
+      -12,
+      12
+    ],
+    "counter": [
+      -7,
+      19
+    ],
+    "lead": [
+      0,
+      24
+    ]
+  },
+  "cse_wide_bounds": [
+    -36,
+    36
+  ],
+  "cse_inner_bounds": [
+    -12,
+    24
+  ],
+  "spectral_parameters": {
+    "sigma_hz": 1.0,
+    "q_per_100hz": 0.8,
+    "model_base_freq_hz": 100.0,
+    "max_freq_hz": 4000.0,
+    "resolution_hz": 1.0
+  }
+}

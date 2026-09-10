@@ -1,0 +1,133 @@
+{
+  "format": "CompositionStyle/1",
+  "scale_id": "pentatonic_12",
+  "prime_rewards": {
+    "2": 0.0,
+    "3": 0.0,
+    "5": 0.0,
+    "7": 0.0,
+    "11": 0.0,
+    "13": 0.0,
+    "17": 0.0
+  },
+  "ngram_file": "pentatonic_12.ngram.txt",
+  "lead_pc_target_distribution": {
+    "0": 26,
+    "2": 20,
+    "4": 16,
+    "7": 24,
+    "9": 14
+  },
+  "attack_cse_percentile_limits": {
+    "two_note_attack": {
+      "dyad": 0.6
+    },
+    "three_note_attack": {
+      "dyad_subsets": 0.7,
+      "triad": 0.5
+    },
+    "four_note_attack": {
+      "dyad_subsets": 0.8,
+      "triad_subsets": 0.6,
+      "tetrad": 0.3
+    },
+    "fallback_slack": 0.1
+  },
+  "cse_weights": {
+    "CSE_2D_A": 1.0,
+    "CSE_2D_B": 0.0,
+    "CSE_2D_C": 0.0,
+    "LEAD_CHORD_FIELD_CSE_STRONG_WEIGHT": 2.0,
+    "LEAD_CHORD_FIELD_CSE_WEAK_WEIGHT": 1.0,
+    "LEAD_CHORD_FIELD_CSE_CENTER": 0.0
+  },
+  "annealing": {
+    "enabled": true,
+    "subset_correction": {
+      "triad": 0.3333333333333333,
+      "tetrad": 0.3333333333333333
+    },
+    "objective_weights": {
+      "attack": 2.0,
+      "sounding": 6.0,
+      "background": 2.0,
+      "voice_leading": 0.5
+    },
+    "cse_loss_polynomials": {
+      "two_note_attack": {
+        "a": 1.0,
+        "b": -2.0,
+        "c": 1.0
+      },
+      "three_note_attack": {
+        "a": 1.0,
+        "b": -1.0,
+        "c": 0.0
+      },
+      "four_note_attack": {
+        "a": 1.0,
+        "b": 0.0,
+        "c": 0.0
+      },
+      "sounding": {
+        "a": 1.0,
+        "b": -1.0,
+        "c": 0.0
+      }
+    },
+    "attack": {
+      "cardinality_weights": {
+        "2": 1.0,
+        "3": 1.0,
+        "4": 1.0
+      },
+      "percentile_excess_weight": 15.0,
+      "percentile_excess_squared_weight": 30.0
+    },
+    "background_voice_weights": {
+      "counter": 0.58,
+      "inner": 0.72,
+      "bass": 0.62
+    },
+    "voice_leading": {
+      "motion_weight": 1.0,
+      "repeat_cost": 2.0,
+      "large_leap_cost": 0.1,
+      "ngram_weights": {
+        "counter": 0.82,
+        "inner": 0.72,
+        "bass": 0.62
+      },
+      "bass_ngram_weight": 1.0,
+      "register_weights": {
+        "counter": 0.02,
+        "inner": 0.024,
+        "bass": 0.02
+      }
+    },
+    "sounding_octave_excess_cost": 1.0,
+    "initialization": {
+      "max_attempts": 24,
+      "seed_stride": 1000003
+    },
+    "search": {
+      "steps": 200000,
+      "start_temperature": 0.004,
+      "end_temperature": 1e-05,
+      "move_size_weights": {
+        "1": 0.6,
+        "2": 0.3,
+        "3": 0.1
+      },
+      "local_probability": 0.8,
+      "local_radius_degrees": 3,
+      "quench_sweeps": 2,
+      "progress_every": 25000
+    }
+  },
+  "voice_pc_rewards": {
+    "bass": {},
+    "inner": {},
+    "counter": {}
+  }
+}
