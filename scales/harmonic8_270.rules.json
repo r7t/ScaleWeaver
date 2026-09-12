@@ -5,7 +5,6 @@
   "cleanup": {
     "degree_distances": [],
     "step_distances": [],
-    "passes": 0,
     "soft_penalty": 0.0
   },
   "melody": {

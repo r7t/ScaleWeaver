@@ -17,24 +17,81 @@ import numpy as np
 import harmony_rhythm as hr
 import score_builder as sb
 from annealing_config import resolve_annealing
+from prime_salience import PrimeSalience
+from harmonic_realization import musical_root, is_anchor, realization_cost
 from scale_config import resolved_voice_pc_rewards
 from subset_cse_cache import ensure_cache as ensure_subset_cse_cache
 
-# Backward-compatible default only; Energy derives the active layout from the
-# score/spec and does not use this constant for generation.
-VOICES=('bass','inner','counter','lead')
 EPS=1e-8
+
+
+@lru_cache(maxsize=None)
+def _octave_fifth_four_patterns(octave):
+    harmonic_steps=tuple(round(octave*math.log2(n)) for n in (1,2,3,4,6,8,12,16))
+    return frozenset(tuple(x-row[0] for x in row)
+                     for row in itertools.combinations(harmonic_steps,4))
+
+
+@lru_cache(maxsize=500000)
+def octave_fifth_four_subset(xs,octave):
+    """Whether any four actual notes form the requested 3-limit harmonic subset."""
+    if len(xs)!=5:return False
+    patterns=_octave_fifth_four_patterns(octave)
+    for row in itertools.combinations(sorted(xs),4):
+        if tuple(x-row[0] for x in row) in patterns:return True
+    return False
+
+
+@lru_cache(maxsize=None)
+def _octave_fifth_three_patterns(octave):
+    """Direct 1:2:3 and 2:3:4 patterns in the active EDO."""
+    return frozenset({
+        (0,round(octave*math.log2(2)),round(octave*math.log2(3))),
+        (0,round(octave*math.log2(3/2)),round(octave*math.log2(2))),
+    })
+
+
+@lru_cache(maxsize=500000)
+def octave_fifth_three_subset_count(xs,octave):
+    """Count adjacent triples that are direct 1:2:3 or 2:3:4 structures.
+
+    The comparison uses absolute register distances after a common
+    transposition.  Other 3-limit triples such as 3:4:8 therefore do not
+    match.  After sorting the notes present in this attack/sounding factor,
+    only consecutive three-note windows are inspected.  Intervening voices
+    therefore hide a non-adjacent 1:2:3 or 2:3:4 subset.  Overlapping matching
+    windows each contribute one virtual octave to the anti-collapse count.
+    """
+    if not 3<=len(xs)<=5:return 0
+    patterns=_octave_fifth_three_patterns(octave)
+    ordered=tuple(sorted(xs))
+    return sum(tuple(x-row[0] for x in row) in patterns
+               for row in zip(ordered,ordered[1:],ordered[2:]))
+
+
+@lru_cache(maxsize=500000)
+def octave_family_count(xs,octave):
+    """Exact octave pairs plus virtual octaves from 1:2:3 / 2:3:4 triples."""
+    # Within one octave-equivalence class, count only adjacent occupied
+    # registers.  Thus 1:2:4 has the two edges 1--2 and 2--4, not the
+    # redundant transitive pair 1--4.  This also handles gaps wider than the
+    # old hard-coded three-octave range (for example a bare 1:16 pair).
+    families={}
+    for pitch in xs:
+        families.setdefault(pitch%octave,set()).add(pitch)
+    exact=sum(max(0,len(registers)-1) for registers in families.values())
+    return exact+octave_fifth_three_subset_count(tuple(sorted(xs)),octave)
 
 
 class PrimeReward:
     """Instance-local weights and canonical JI masks; one reward per prime.
 
-    Share the legacy runtime's canonical index, including its wide-register
-    dyad-union fallback, but snapshot it so a later scale/style load cannot
+    Snapshot the runtime's canonical index, including its wide-register
+    dyad-union fallback, so a later scale/style load cannot
     change an existing optimizer's reward. Zero weights require no JI work.
     """
-    def __init__(self,spec):
-        self.weights=tuple(float(spec.style.get('prime_rewards',{}).get(str(p),0.0))
+    def __init__(self,spec,scale=1.0):
+        self.weights=tuple(scale*float(spec.style.get('prime_rewards',{}).get(str(p),0.0))
                            for p in sb.cse_rt.ATTACK_JI_PRIMES)
         self.enabled=any(self.weights);self.edo=spec.edo
         self.index=sb.cse_rt._load_attack_ji_dyad_index() if self.enabled else None
@@ -94,7 +151,8 @@ class OptimizerMetric:
         self.edo=spec.edo
         self.pc_rewards={v:{int(pc):reward for pc,reward in rows.items()}
                          for v,rows in resolved_voice_pc_rewards(spec.style,spec.pcs).items()}
-        self.prime_reward=PrimeReward(spec)
+        self.prime_reward=PrimeReward(spec,config['prime_salience']['presence_scale'])
+        self.prime_salience=PrimeSalience(spec.edo,config['prime_salience'])
         # Annealing revisits the same small set of sonorities many thousands
         # of times. Keep the entire rank -> derived-value -> loss chain hot.
         self._rank_cached=lru_cache(maxsize=500000)(self._rank_uncached)
@@ -150,7 +208,8 @@ class OptimizerMetric:
         return self._sounding_cost_cached(tuple(sorted(map(int,xs))))
 
     def _sounding_cost_uncached(self,xs):
-        return self.cse_loss('sounding',self._corrected_cached(xs))-self.prime_reward(xs)
+        return (self.cse_loss('sounding',self._corrected_cached(xs))-self.prime_reward(xs)
+                -self.prime_salience.reward(xs,'sounding'))
 
     def pitch_class_reward(self,voice,pitch):
         return self.pc_rewards[voice].get(int(pitch)%self.edo,0.0)
@@ -165,7 +224,8 @@ class OptimizerMetric:
         weight=self.attack_config['cardinality_weights'].get(str(n),0.0)
         if not weight:return 0.0
         context={2:'two_note_attack',3:'three_note_attack',4:'four_note_attack',5:'five_note_attack'}[n]
-        return weight*(self.cse_loss(context,self.corrected(xs))-self.prime_reward(xs))
+        return weight*(self.cse_loss(context,self.corrected(xs))-self.prime_reward(xs)
+                       -self.prime_salience.reward(xs,'attack'))
 
     def field(self,chord_id,pitch):
         background=tuple(hr.chord_reference_steps(hr.CHORDS[chord_id]))
@@ -240,17 +300,6 @@ class GreedyInitializer:
             self.expanded_range_choices+=1
             return min(expanded)[1]
         raise sb.GenerationRejected(f'greedy initializer: no vertically legal {voice} pitch at {start}')
-
-
-def initial_score(seed,bars,bpm,motif,time_signature,allow_sixteenth,metric,config):
-    # Compatibility wrapper.  New code should call frontend_generate followed
-    # by accompaniment_generate explicitly; keeping this public function avoids
-    # breaking existing imports while ensuring both paths use the same IR.
-    from joint_frontend_generate import generate_frontend_ir
-    from accompaniment_generate import initialize_score_from_ir
-    frontend=generate_frontend_ir(seed,bars,bpm,motif,time_signature,
-                                  allow_sixteenth,spec=hr.SCALE)
-    return initialize_score_from_ir(frontend,metric,config,hr.SCALE)
 
 
 class Energy:
@@ -351,6 +400,32 @@ class Energy:
                 self.slices.append((a,b,ids));self.add('sounding',ids,w['sounding']*(b-a)/duration)
         attacks=[ids for ids in self.onsets.values() if 2<=len(ids)<=self.metric.max_cardinality]
         for ids in attacks:self.add('attack',ids,w['attack']/max(1,len(attacks)))
+        realization = self.config['harmonic_realization']
+        if realization['enabled'] and realization['weight']:
+            # Intersect sounding slices with harmonic boundaries: a sustained
+            # note must support BOTH harmonies if the plan changes underneath.
+            cursor = 0.0
+            for bar_index, bar in enumerate(self.score['harmony_plan']):
+                bpb = float(bar.get('beats_per_bar',self.score['beats_per_bar']))
+                for segment in bar['chord_segments']:
+                    start = cursor + segment['offset']
+                    end = start + segment['duration']
+                    anchor = is_anchor(hr,segment)
+                    multiplier = realization['anchor_multiplier'] if anchor else 1.0
+                    cadence = (int(bar.get('bar_in_phrase',bar_index % 8)) ==
+                               int(bar.get('phrase_bars',8))-1)
+                    if anchor and cadence: multiplier *= realization['cadence_multiplier']
+                    if anchor and bar_index == len(self.score['harmony_plan'])-1:
+                        multiplier = max(multiplier,realization['final_multiplier'])
+                    for a,b,ids in self.slices:
+                        span = min(b,end)-max(a,start)
+                        if span <= EPS: continue
+                        data = (tuple(self.voice[i] for i in ids),
+                                tuple(hr.CHORDS[segment['chord_id']].pcs),
+                                musical_root(hr,segment))
+                        self.add('harmonic_realization',ids,
+                                 realization['weight']*multiplier*span/duration,data)
+                cursor += bpb
         transitions=sum(max(0,len(self.by_voice[v])-1) for v in self.accompaniment)
         mutable_count=max(1,len(self.accompaniment))
         for v in self.accompaniment:
@@ -381,11 +456,25 @@ class Energy:
     def evaluate(self,factor):
         kind,ids,scale,data=factor;xs=tuple(self.pitches[i] for i in ids)
         if kind=='sounding':
-            octaves=sum(abs(a-b) in (hr.OCT,2*hr.OCT,3*hr.OCT) for a,b in itertools.combinations(xs,2))
             allowance=int(self.config['sounding_octave_family_pair_allowance'].get(str(len(xs)),1))
             value=(self.metric.sounding_cost(xs)
-                   + self.config['sounding_octave_excess_cost']*max(0,octaves-allowance))
-        elif kind=='attack':value=self.metric.attack_cost(xs)
+                   + self.config['sounding_octave_excess_cost']
+                   * max(0,octave_family_count(tuple(sorted(xs)),self.metric.edo)-allowance)
+                   + self.config['sounding_octave_fifth_subset_cost']
+                   * octave_fifth_four_subset(tuple(sorted(xs)),self.metric.edo))
+        elif kind=='attack':
+            value=(self.metric.attack_cost(xs)
+                   + (self.config['sounding_octave_excess_cost']
+                      * max(0,octave_family_count(tuple(sorted(xs)),self.metric.edo)
+                            - int(self.config['sounding_octave_family_pair_allowance']
+                                  .get(str(len(xs)),1)))
+                      if 3<=len(xs)<=5 else 0.0)
+                   + self.config['sounding_octave_fifth_subset_cost']
+                   * octave_fifth_four_subset(tuple(sorted(xs)),self.metric.edo))
+        elif kind=='harmonic_realization':
+            voices,pcs,root=data
+            value=realization_cost(xs,voices,pcs,root,self.metric.edo,
+                                   self.config['harmonic_realization'])
         elif kind in ('background','register','pitch_class_reward'):value=data[xs[0]]
         else:value=self._motion_value(data,xs)
         return scale*value
@@ -467,7 +556,7 @@ class Energy:
         self.pitches=list(pitches);self.values=[self.evaluate(f) for f in self.factors];self.total=math.fsum(self.values)
 
     def components(self):
-        out=dict.fromkeys(('attack','sounding','background','voice_leading','pitch_class_reward'),0.0)
+        out=dict.fromkeys(('attack','sounding','background','voice_leading','pitch_class_reward','harmonic_realization'),0.0)
         for f,v in zip(self.factors,self.values):out['voice_leading' if f[0]=='register' else f[0]]+=v
         return out
 
@@ -475,6 +564,7 @@ class Energy:
         """Four exhaustive reporting buckets; does not affect optimization."""
         parts=self.components()
         return {
+            'harmonic_realization_energy':parts['harmonic_realization'],
             'background_chord_field_energy':parts['background'],
             'attack_energy':parts['attack'],
             'sounding_energy':parts['sounding'],
@@ -493,6 +583,7 @@ def optimize(score,metric,config):
     started=time.perf_counter();energy=Energy(score,metric,config)
     initial=energy.total;initial_components=energy.components();best=initial;best_pitches=list(energy.pitches)
     initial_sources=energy.energy_sources()
+    initial_salience=metric.prime_salience.diagnostics(score) if metric.prime_salience.enabled else None
     initial_pitches=list(energy.pitches);fixed_events=copy.deepcopy(score['voices']['lead'])
     rhythm={v:[(e['start_beat'],e['duration_beats']) for e in xs] for v,xs in score['voices'].items()}
     rng=random.Random(int(score['seed'])^0xA66EA11);search=config['search'];steps=search['steps']
@@ -529,6 +620,12 @@ def optimize(score,metric,config):
     if score['voices']['lead']!=fixed_events:raise AssertionError('Annealing modified melody')
     if rhythm!={v:[(e['start_beat'],e['duration_beats']) for e in xs] for v,xs in score['voices'].items()}:raise AssertionError('Annealing changed rhythm')
     final_sources=energy.energy_sources()
+    salience_report={'initial':initial_salience,
+                     'final':metric.prime_salience.diagnostics(score)} if metric.prime_salience.enabled else None
+    if salience_report:
+        for context in ('sounding_duration_weighted','attack_equal_onset'):
+            print('Prime salience '+context+': '+str(salience_report['initial'][context])
+                  +' -> '+str(salience_report['final'][context]),flush=True)
     energy_sources={
         'initial':initial_sources,
         'final':final_sources,
@@ -540,6 +637,7 @@ def optimize(score,metric,config):
             'subset_cse_cache_manifest':str(metric.subset_cache.manifest_path),
             'initial_energy':initial,'final_energy':energy.total,'initial_components':initial_components,
             'final_components':energy.components(),'energy_sources':energy_sources,
+            'prime_salience':salience_report,
             'steps':steps,'proposed_moves':proposed,
             'accepted_moves':accepted,'accepted_uphill_moves':uphill,'move_sizes':counts,
             'quench_moves':quenched,'changed_notes':sum(a!=b for a,b in zip(initial_pitches,energy.pitches)),
@@ -578,18 +676,3 @@ def final_metrics(score,metric):
         rows=[(1,values(xs)) for xs in groups.values() if len(xs)==n]
         out[f'{n}_note_simultaneous_attack']=summarize(rows,'equal_onset_mean_exact_cardinality')
     return out
-
-
-def attack_diagnostics(score,metric):
-    """Compatibility hook for callers written before percentile removal."""
-    return {'enabled':False,'reason':'attack percentile limits removed'}
-
-
-def generate(seed,bars,bpm,motif,time_signature,allow_sixteenth,spec):
-    # Compatibility one-call API, implemented through the public two-stage
-    # boundary so it cannot drift from the file-based workflow.
-    from joint_frontend_generate import generate_frontend_ir
-    from accompaniment_generate import generate_from_ir
-    frontend=generate_frontend_ir(seed,bars,bpm,motif,time_signature,
-                                  allow_sixteenth,spec=spec)
-    return generate_from_ir(frontend,spec)

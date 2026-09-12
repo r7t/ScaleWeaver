@@ -5,11 +5,11 @@
 The rhythm grammar and random-call order are inherited from the 2026-08-30
 TianGan generator. Scale-specific pitch data live in ScaleSpec. The canonical
 72-EDO TianGan vocabulary retains its frozen 32 chords. Seven-note scales with
-at least five canonical-JI major/minor triads use a separate diatonic T/S/D/T
-progression route and strongly prefer those triad pitch-class sets.
+an equal-fifth meantone chain and at least five canonical-JI major/minor triads
+use a separate degree progression route with ii-V-I cadences.
 """
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import combinations
 import math, random
 from pathlib import Path
@@ -17,11 +17,11 @@ from typing import Iterable
 
 from scale_config import ScaleSpec
 import copy
-from csebundle import CSEBundle
+from spectral_bundle import SpectralBundle
 
 # Import-safe defaults; configure_scale() binds the active definition and rules.
 SCALE: ScaleSpec | None = None
-CSE: CSEBundle | None = None
+CSE: SpectralBundle | None = None
 OCT=0
 PCS=()
 NAMES=()
@@ -37,9 +37,6 @@ _CSE_HARMONY_GAIN=7.0
 CSE_CHORD_BLEND=.68
 CSE_CHORD_SOFTMAX_BASE=5.5
 FORM_TEMPLATE=('A','A','B','B','A','B')
-
-# compatibility path diagnostics
-_CSE_TABLE_PATH=_CSE2_TABLE_PATH=_CSE3_TABLE_PATH=_CSE4_TABLE_PATH=_CSE5_TABLE_PATH=None
 
 @dataclass(frozen=True)
 class Chord:
@@ -136,17 +133,16 @@ def _meta(path, default):
     return cur
 
 
-def configure_scale(spec:ScaleSpec,bundle:CSEBundle,ji_table=None):
+def configure_scale(spec:ScaleSpec,bundle:SpectralBundle,ji_table=None):
     global SCALE,CSE,OCT,PCS,NAMES,PC_NAME,BASE_FREQ,RANGES,POOLS,VELOCITY,HARD_WOLF,SECOND_MAX_STEP
     global CHORDS,FUNCTION_CHORD_FAMILIES,PALETTE_COLOR_FAMILIES,ANCHOR_CHORD_ID,ANCHOR_CHORD_IDS
     global NATURAL_SCALE_MODE,NATURAL_TRIAD_INFO
     global FUNCTION_CLASS_PRIOR,FUNCTION_TRANSITION_LOG_BIAS
-    global _CSE_TABLE_PATH,_CSE2_TABLE_PATH,_CSE3_TABLE_PATH,_CSE4_TABLE_PATH,_CSE5_TABLE_PATH
     SCALE,CSE=spec,bundle; OCT=int(spec.edo); PCS=tuple(spec.pcs); NAMES=tuple(spec.names); PC_NAME=dict(zip(PCS,NAMES))
     BASE_FREQ=float(spec.base_freq_hz); RANGES=spec.resolved_voice_ranges(); POOLS={v:list(spec.make_pool(*b)) for v,b in RANGES.items()}
     gen=_meta(('generator',),{})
     VELOCITY={**{'bass':.6,'inner':.6,'inner2':.6,'counter':.6,'lead':.6}, **{str(k):float(v) for k,v in gen.get('velocity',{}).items()}}
-    wolves=tuple(spec.forbidden_intervals); HARD_WOLF=int(wolves[0]) if wolves else -1
+    wolves=tuple(spec.wolf_intervals); HARD_WOLF=int(wolves[0]) if wolves else -1
     SECOND_MAX_STEP=int(gen.get('second_max_step', max(1, round(OCT/spec.note_count))))
     hstyle=_meta(('harmony_style',),{})
     FUNCTION_CLASS_PRIOR={**{'T':.30,'S':.25,'D':.25,'C':.20}, **{str(k):float(v) for k,v in hstyle.get('function_class_prior',{}).items()}}
@@ -157,9 +153,14 @@ def configure_scale(spec:ScaleSpec,bundle:CSEBundle,ji_table=None):
     CHORDS=_build_chords(spec)
     NATURAL_TRIAD_INFO=_detect_natural_scale_triads(spec,ji_table)
     min_hits=int(((spec.harmony or {}).get('natural_scale_progression') or {}).get('min_triad_count',5))
-    NATURAL_SCALE_MODE=(int(spec.note_count)==7 and len(NATURAL_TRIAD_INFO)>=max(5,min_hits))
+    NATURAL_SCALE_MODE=(_is_meantone_diatonic(spec) and len(NATURAL_TRIAD_INFO)>=max(5,min_hits))
     if not NATURAL_SCALE_MODE:
         NATURAL_TRIAD_INFO={}
+    if NATURAL_SCALE_MODE:
+        for cid, chord in tuple(CHORDS.items()):
+            degree = _natural_degree(chord)
+            if degree is not None:
+                CHORDS[cid] = replace(chord, function_code={1:"T", 2:"S", 3:"T", 4:"S", 5:"D", 6:"T", 7:"D"}[degree])
     _add_manual_progression_chords(spec)
     FUNCTION_CHORD_FAMILIES={f:frozenset(cid for cid,c in CHORDS.items() if c.function==f) for f in 'TSDC'}
     PALETTE_COLOR_FAMILIES={}
@@ -168,7 +169,6 @@ def configure_scale(spec:ScaleSpec,bundle:CSEBundle,ji_table=None):
     ANCHOR_CHORD_IDS=_anchor_ids(spec)
     ANCHOR_CHORD_ID=ANCHOR_CHORD_IDS[0] if ANCHOR_CHORD_IDS else None
     if not ANCHOR_CHORD_IDS: raise RuntimeError('no eligible T-function anchor chords found')
-    path=getattr(bundle,'manifest_path',None); _CSE_TABLE_PATH=_CSE2_TABLE_PATH=_CSE3_TABLE_PATH=_CSE4_TABLE_PATH=_CSE5_TABLE_PATH=path
 
 
 def _build_chords(spec):
@@ -312,31 +312,9 @@ def _entry(steps,default=None,prefer_inner=False):
     return CSE.entry(tuple(sorted(map(int,steps))),prefer_inner=prefer_inner) or default
 
 def cse_entry(steps): return _entry(steps,None,False)
-def cse2_entry(steps): return _entry(steps,None,False) if len(tuple(steps))==2 else None
-def cse3_entry(steps): return _entry(steps,None,False) if len(tuple(steps))==3 else None
 def cse4_entry(steps): return _entry(steps,None,False) if len(tuple(steps))==4 else None
-def cse5_entry(steps): return _entry(steps,None,True) if len(tuple(steps))==5 else None
-def cse_score(steps,default=None):
-    x=cse_entry(steps); return float(x[0]) if x is not None else default
-def cse2_score(steps,default=None):
-    x=cse2_entry(tuple(steps)); return float(x[0]) if x is not None else default
-def cse3_score(steps,default=None):
-    x=cse3_entry(tuple(steps)); return float(x[0]) if x is not None else default
 def cse4_score(steps,default=None):
     x=cse4_entry(tuple(steps)); return float(x[0]) if x is not None else default
-def cse5_score(steps,default=None):
-    x=cse5_entry(tuple(steps)); return float(x[0]) if x is not None else default
-def cse_entropy(steps,default=None): return cse_score(steps,default)
-def cse_percentile(steps,default=.5):
-    x=cse_entry(steps); return float(x[1]) if x is not None else float(default)
-def load_cse_table(path=None): return {'format':'AdaptiveCSE/native-colex-f64-1'}
-def load_cse2_table(path=None): return load_cse_table(path)
-def load_cse3_table(path=None): return load_cse_table(path)
-def load_cse4_table(path=None): return load_cse_table(path)
-def load_cse5_table(path=None): return load_cse_table(path)
-
-def cse_backend_info():
-    return {'backend':'adaptive_native_colex_f64','manifest':str(_CSE_TABLE_PATH) if _CSE_TABLE_PATH else None}
 
 def chord_reference_steps(chord:Chord):
     foot=chord.foot%OCT
@@ -351,10 +329,6 @@ def objective_entry(steps):
 def chord_cse_score(chord):
     row=objective_entry(chord_reference_steps(chord))
     return row[0] if row is not None else 2.0
-def chord_cse_percentile(chord): return cse_percentile(chord_reference_steps(chord))
-def vertical_cse_entropy(chord,step): return cse_entropy(chord_reference_steps(chord)+(int(step),))
-def vertical_cse_score(chord,step): return cse_score(chord_reference_steps(chord)+(int(step),),default=2.4)
-def vertical_cse_percentile(chord,step): return cse_percentile(chord_reference_steps(chord)+(int(step),))
 
 def _chord_base_weight(chord):
     """Function/cardinality prior and CSE, without pitch or prime-family quotas."""
@@ -427,46 +401,40 @@ def _natural_progression_config():
     return {
         'enabled':bool(raw.get('enabled',True)),
         'min_triad_count':max(5,int(raw.get('min_triad_count',5))),
-        # With roughly 5--7 conventional triads among dozens of generic
-        # candidates this makes them the clear majority without banning colour
-        # chords outright.
+        # Retained for the joint objective's conventional-triad prior.
         'triad_weight':max(0.,float(raw.get('triad_weight',24.0))),
-        'function_match_weight':max(0.,float(raw.get('function_match_weight',7.0))),
-        'function_mismatch_factor':max(0.,float(raw.get('function_mismatch_factor',.10))),
-        'repeat_factor':max(0.,float(raw.get('repeat_factor',.28))),
     }
 
 
-_NATURAL_FUNCTION_PATHS=(
-    (('T','T','S','D','T','S','D','T'),1.00),
-    (('T','S','T','D','T','S','D','T'),.90),
-    (('T','S','D','T','S','T','D','T'),.82),
-    (('T','T','S','T','S','D','D','T'),.72),
-    (('T','S','S','D','T','T','D','T'),.66),
+# All routes prepare the dominant through ii or IV and resolve it to I.
+# vi and iii provide tonic-family minor colour without D -> S retrogression.
+_NATURAL_DEGREE_PATHS=(
+    ((1,6,2,5,1,2,5,1), 1.0),
+    ((1,3,6,4,2,2,5,1), .8),
+    ((1,4,2,5,1,2,5,1), .7),
+    ((1,6,2,2,5,5,1,1), .6),
 )
 
 
-def _sample_natural_function_path(rng):
-    return weighted_choice(_NATURAL_FUNCTION_PATHS,rng)
+def _natural_degree(chord):
+    for i in range(len(PCS)):
+        if set(chord.pcs)=={PCS[(i+j)%len(PCS)] for j in (0,2,4)}:
+            return i+1
+    return None
 
 
-def _natural_chord_weight(prev,cand,target,cfg):
-    w=_chord_transition_weight(prev,cand)
-    if cand.function==target:
-        w*=cfg['function_match_weight']
-    else:
-        w*=cfg['function_mismatch_factor']
-    if prev is not None and prev.id==cand.id:
-        w*=cfg['repeat_factor']
-    return max(w,1e-15)
-
-
-def _choose_natural_chord(prev_cid,rng,target,cfg):
-    prev=CHORDS.get(prev_cid) if prev_cid else None
-    return weighted_choice([
-        (cid,_natural_chord_weight(prev,chord,target,cfg))
-        for cid,chord in CHORDS.items()
-    ],rng)
+def _is_meantone_diatonic(spec):
+    """Require a diatonic chain of six identical fifths; excludes JI wolves."""
+    if spec.note_count != 7:
+        return False
+    pcs=set(spec.pcs)
+    fifth=round(spec.edo * math.log2(1.5))
+    # Meantone identifies four fifths with a major third plus two octaves.
+    # An equal-fifth chain alone also admits non-meantone systems (e.g. 22).
+    if 4*fifth-2*spec.edo != round(spec.edo * math.log2(5/4)):
+        return False
+    return any({(start+i*fifth)%spec.edo for i in range(7)}==pcs
+               for start in pcs)
 
 
 def _natural_segment(c,offset,duration,target):
@@ -487,28 +455,27 @@ def _natural_segment(c,offset,duration,target):
     }
 
 
-def make_natural_section_harmony(section,rng,bpb,force_first_bar_tonic=False):
-    """Eight-bar diatonic route with varied T/S/D/T motion and firm cadence."""
-    cfg=_natural_progression_config()
-    function_path=_sample_natural_function_path(rng)
-    bars_out=[]; prev_cid=None; count_profile=section_chord_counts(rng,bpb)
-    duration_plan=[choose_chord_durations(rng,bpb,n,i==7) for i,n in enumerate(count_profile)]
-    for i,durations in enumerate(duration_plan):
-        target=function_path[i]; phrase_final=i==7; segments=[]; offset=0.
-        for j,dur in enumerate(durations):
-            forced_opening=force_first_bar_tonic and i==0 and j==0
-            forced_final=phrase_final and j==len(durations)-1
-            if forced_opening or forced_final:
-                cid=_choose_anchor_chord_id(rng)
-            else:
-                cid=_choose_natural_chord(prev_cid,rng,target,cfg)
-            c=CHORDS[cid]
-            segments.append(_natural_segment(c,offset,dur,target))
-            offset+=float(dur); prev_cid=cid
-        if abs(offset-float(bpb))>1e-6:
-            raise RuntimeError(f'harmony bar duration {offset} != {bpb}')
-        bars_out.append(segments)
-    return bars_out
+def make_natural_section_harmony(section,rng,bpb,force_first_bar_tonic=False,bars=8):
+    """Plan complete degree routes before the spectral/voicing search."""
+    path=list(weighted_choice(_NATURAL_DEGREE_PATHS,rng)[:bars])
+    # Truncated phrases still prepare and resolve a cadence.
+    if bars < 8:
+        path=([1,3,6,4][:bars-3]+[2,5,1] if bars>=3
+              else [5,1][-bars:])
+    if force_first_bar_tonic:
+        path[0]=1
+    by_degree={_natural_degree(c):c for c in CHORDS.values()
+               if _natural_degree(c) is not None}
+    missing=set(path)-set(by_degree)
+    if missing:
+        raise ValueError(f'meantone progression lacks legal degree triads: {sorted(missing)}')
+    output=[]
+    for degree in path:
+        c=by_degree[degree]
+        segment=_natural_segment(c,0.,bpb,c.function)
+        segment.update(root_degree=degree,root_pc=PCS[degree-1])
+        output.append([segment])
+    return output
 
 def _tiangan_progression_config():
     """Resolve the TianGan-only phrase curve from the rules JSON."""
@@ -742,10 +709,12 @@ def harmony_plan(bars,rng,bpb):
                 section,rng,bpb,force_first_bar_tonic=len(out)==0,
                 prevalence_state=prevalence_state)
         elif natural_mode:
-            if section not in templates:
-                templates[section]=make_natural_section_harmony(
-                    section,rng,bpb,force_first_bar_tonic=len(out)==0)
-            template=templates[section]
+            length=min(8,bars-len(out))
+            key=(section,length)
+            if key not in templates:
+                templates[key]=make_natural_section_harmony(
+                    section,rng,bpb,force_first_bar_tonic=len(out)==0,bars=length)
+            template=templates[key]
         else:
             if section not in templates:
                 templates[section]=make_section_harmony(section,rng,bpb,force_first_bar_tonic=len(out)==0)
@@ -780,6 +749,7 @@ def _manual_harmony_plan(bars, bpb, progression):
     sequence = codes if codes is not None else degrees
     definitions = SCALE.resolved_chord_codes() if codes is not None else None
     span = progression['bars_per_chord']
+    phrase_bars = span * len(sequence)
     out = []
     for bar in range(bars):
         position = (bar // span) % len(sequence)
@@ -804,12 +774,13 @@ def _manual_harmony_plan(bars, bpb, progression):
             seg['root_degree'] = d
         else:
             seg['chord_code'] = token
-        ph, local = divmod(bar, 8)
+        ph, local = divmod(bar, phrase_bars)
         section = FORM_TEMPLATE[ph % len(FORM_TEMPLATE)]
         h = {
             'bar': bar, 'phrase_index': ph, 'bar_in_phrase': local,
-            'subphrase_index': bar//4, 'subphrase_in_phrase': local//4,
-            'bar_in_subphrase': local%4, 'section': section,
+            'phrase_bars': phrase_bars,
+            'subphrase_index': bar, 'subphrase_in_phrase': local,
+            'bar_in_subphrase': 0, 'section': section,
             'section_occurrence': sum(FORM_TEMPLATE[i % len(FORM_TEMPLATE)] == section for i in range(ph)),
             'beats_per_bar': bpb, 'chords_in_bar': 1, 'chord_segments': [seg],
             'manual_progression': True, 'progression_index': position,
@@ -929,7 +900,7 @@ def _semi_broken_attacks(durations):
     return tuple(out)
 
 def _has_triplet_value(durations):
-    """Backward-compatible detector; generated palettes contain no tuplets."""
+    """Return whether a generated palette accidentally contains a tuplet."""
     vals = (1 / 6, 1 / 3, 2 / 3)
     return any(any(abs(float(d) - v) < 1e-06 for v in vals) for d in durations)
 

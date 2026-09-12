@@ -1,10 +1,9 @@
-"""ScaleWeaver: unchanged seeded melody, greedy harmony and whole-score annealing."""
+"""ScaleWeaver composition pipeline and command-line entry point."""
 from __future__ import annotations
 import argparse
 import json
 import math
 import os
-import warnings
 from pathlib import Path
 from functools import lru_cache
 from itertools import combinations
@@ -12,8 +11,8 @@ import harmony_rhythm as hr
 import score_builder as sb
 import ji_ratio
 from scale_config import load_scale
-from csebundle import CSEBundle, ensure_bundle, numerical_signature
-from spectral_bundle import _bundle_covers_spec_data
+from spectral_bundle import (SpectralBundle, ensure_bundle,
+                             _bundle_covers_spec_data)
 
 DEFAULT_SCALE_CONFIG=None
 _ACTIVE_SCALE_SPEC=None
@@ -76,7 +75,7 @@ def _configure_adaptive_scale(scale_config=None, cse_dir=None, *, rules_config=N
         if _ACTIVE_CSE_BUNDLE is not None:
             try: _ACTIVE_CSE_BUNDLE.close()
             except Exception: pass
-        _ACTIVE_CSE_BUNDLE = CSEBundle(manifest, spec, allow_superset=True)
+        _ACTIVE_CSE_BUNDLE = SpectralBundle(manifest, spec, allow_superset=True)
         _ACTIVE_CSE_MANIFEST = Path(manifest)
     ji_dir = Path(cse_dir) / 'ji_cache'
     _ACTIVE_JI_TABLE = ji_ratio.ensure_loaded_table(spec, ji_dir)
@@ -84,7 +83,7 @@ def _configure_adaptive_scale(scale_config=None, cse_dir=None, *, rules_config=N
     hr.configure_scale(spec, _ACTIVE_CSE_BUNDLE, _ACTIVE_JI_TABLE)
     # Share the already parsed (potentially very large) JI table with the
     # runtime. Passing its path used to parse the same JSON a second time.
-    sb.cse_rt.configure_scale(spec, _ACTIVE_JI_TABLE, se_dir=cse_dir, se_workers=cse_workers)
+    sb.cse_rt.configure_scale(spec, _ACTIVE_JI_TABLE)
     sb.configure_scale(spec)
     hr.configure(cse_strength, cse_harmony_gain)
     for value in tuple(globals().values()):
@@ -115,13 +114,6 @@ def _voice_pitch_class_ratios(voices):
     return rows
 
 
-def _print_voice_pitch_class_ratios(voices):
-    """Print compact 各音级 event-count percentages for every voice."""
-    ratios = _voice_pitch_class_ratios(voices)
-    print('Voice pitch-class ratios (event count)')
-    for voice, row in ratios.items():
-        text = ' '.join(f'{name}:{row[name] * 100:5.1f}%' for name in hr.NAMES)
-        print(f'  {voice:<8} {text}')
 
 
 
@@ -129,12 +121,8 @@ def _print_voice_pitch_class_ratios(voices):
 # Attack-instant interval / canonical just-intonation export
 # ---------------------------------------------------------------------------
 ATTACK_ANALYSIS_PRIME_LIMIT = 17
-ATTACK_ANALYSIS_INTEGER_LIMIT = None
 ATTACK_ANALYSIS_EPS = 1e-9
 ATTACK_ANALYSIS_PRIMES = (2, 3, 5, 7, 11, 13, 17)
-
-ATTACK_ANALYSIS_JI_TABLE_FILENAME = None  # generated per active scale
-
 
 def _load_attack_ji_precomputed_table():
     """Return the active scale-specific canonical 17-limit patent-val JI table."""
@@ -150,53 +138,22 @@ def _require_attack_ji_precomputed_table():
     return table
 
 
-def _precomputed_attack_ji_dyad_index():
-    table = _require_attack_ji_precomputed_table()
-    return {
-        int(k): {
-            'numerator': int(v['numerator']),
-            'denominator': int(v['denominator']),
-            'ratio': str(v['ratio']),
-        }
-        for k, v in table.get('dyad_residue', {}).items()
-    }
 
 
-def _canonical_precomputed_dyad_from_step_difference(step_difference):
+
+
+def _precomputed_attack_ji_lookup(interval_steps):
     if _ACTIVE_JI_TABLE is None:
-        return None
-    return _ACTIVE_JI_TABLE.lookup((0, abs(int(step_difference))))
-
-
-def _precomputed_attack_ji_lookup(interval_steps, prime_limit, integer_limit=None):
-    if int(prime_limit) != ATTACK_ANALYSIS_PRIME_LIMIT or _ACTIVE_JI_TABLE is None:
         return None
     return _ACTIVE_JI_TABLE.lookup(tuple(int(x) for x in interval_steps))
 
 
-def _is_prime_limit_integer(n, prime_limit=ATTACK_ANALYSIS_PRIME_LIMIT):
-    """Compatibility helper: true iff n is smooth at the requested prime limit."""
-    n = int(n)
-    if n < 1:
-        return False
-    m = n
-    for p in ATTACK_ANALYSIS_PRIMES:
-        if p > int(prime_limit):
-            break
-        while m % p == 0:
-            m //= p
-    return m == 1
 
 
 @lru_cache(maxsize=32768)
-def _canonical_integer_ji_from_step_intervals(
-    interval_steps,
-    prime_limit=ATTACK_ANALYSIS_PRIME_LIMIT,
-    integer_limit=ATTACK_ANALYSIS_INTEGER_LIMIT,
-):
+def _canonical_integer_ji_from_step_intervals(interval_steps):
     """Return the canonical patent-val JI model for a 2/3/4/5-note sonority.
 
-    ``integer_limit`` is retained only for call compatibility and is ignored.
     The active mapping has no fixed integer limit: it requires exact mapping
     under the EDO's 17-limit patent val, using the configured dynamic RMS
     threshold, then minimizes the
@@ -207,45 +164,12 @@ def _canonical_integer_ji_from_step_intervals(
         raise ValueError(f'expected 2, 3, 4, or 5 offsets, got {steps!r}')
     if not steps or steps[0] != 0 or any(a >= b for a, b in zip(steps, steps[1:])):
         raise ValueError(f'expected strictly increasing offsets beginning at 0, got {steps!r}')
-    if int(prime_limit) != ATTACK_ANALYSIS_PRIME_LIMIT:
-        raise ValueError('the canonical attack-JI mapper is fixed at 17-prime-limit')
-
-    precomputed = _precomputed_attack_ji_lookup(steps, prime_limit, integer_limit)
+    precomputed = _precomputed_attack_ji_lookup(steps)
     if precomputed is not None:
         return precomputed
 
     edo = int(hr.OCT)
     return ji_ratio.canonical_fallback(edo, steps)
-
-
-@lru_cache(maxsize=8192)
-def _canonical_four_integer_ji_from_step_intervals(
-    interval_steps,
-    prime_limit=ATTACK_ANALYSIS_PRIME_LIMIT,
-    integer_limit=ATTACK_ANALYSIS_INTEGER_LIMIT,
-):
-    """Backward-compatible four-note wrapper."""
-    steps = tuple(int(x) for x in interval_steps)
-    if len(steps) != 4:
-        raise ValueError(f'expected four offsets, got {steps!r}')
-    return _canonical_integer_ji_from_step_intervals(
-        steps, prime_limit, integer_limit
-    )
-
-
-@lru_cache(maxsize=16384)
-def _canonical_three_integer_ji_from_step_intervals(
-    interval_steps,
-    prime_limit=ATTACK_ANALYSIS_PRIME_LIMIT,
-    integer_limit=ATTACK_ANALYSIS_INTEGER_LIMIT,
-):
-    """Canonical 3-integer JI construction for one three-note subset."""
-    steps = tuple(int(x) for x in interval_steps)
-    if len(steps) != 3:
-        raise ValueError(f'expected three offsets, got {steps!r}')
-    return _canonical_integer_ji_from_step_intervals(
-        steps, prime_limit, integer_limit
-    )
 
 
 def _canonical_three_note_subsets(steps):
@@ -265,9 +189,7 @@ def _canonical_three_note_subsets(steps):
         subset_abs = tuple(xs[i] for i in kept_indices)
         root = subset_abs[0]
         subset_intervals = tuple(x - root for x in subset_abs)
-        canonical = _canonical_three_integer_ji_from_step_intervals(
-            subset_intervals
-        )
+        canonical = _canonical_integer_ji_from_step_intervals(subset_intervals)
         out.append({
             'deleted_index': deleted_index,
             'kept_indices': list(kept_indices),
@@ -290,9 +212,7 @@ def _canonical_four_note_subsets(steps):
         subset_abs = tuple(xs[i] for i in kept_indices)
         root = subset_abs[0]
         subset_intervals = tuple(x - root for x in subset_abs)
-        canonical = _canonical_four_integer_ji_from_step_intervals(
-            subset_intervals
-        )
+        canonical = _canonical_integer_ji_from_step_intervals(subset_intervals)
         out.append({
             'deleted_index': deleted_index,
             'kept_indices': list(kept_indices),
@@ -325,14 +245,6 @@ def _ratio_prime_presence(integers):
     }
 
 
-def _ratio_string_integers(ratio_string):
-    """Parse ``a:b:c`` attack-ratio text; singleton ``1`` is supported."""
-    if ratio_string is None:
-        return ()
-    try:
-        return tuple(int(x) for x in str(ratio_string).split(':'))
-    except (TypeError, ValueError):
-        return ()
 
 
 
@@ -381,24 +293,6 @@ def _simultaneous_prime_flags(row):
     return _prime_flags_from_fit(fit)
 
 
-def _canonical_simultaneous_attack_ratio(attacking_steps):
-    """Canonical rational ratio of notes that *actually attack together*.
-
-    A singleton attack is intentionally represented by the literal string ``1``.
-    Two- through five-note attacks use the same 17-limit patent-val canonical
-    fitter as the sounding-sonority analysis.
-    """
-    steps = tuple(sorted(int(x) for x in attacking_steps))
-    if not steps:
-        return None
-    if len(steps) == 1:
-        return '1'
-    if len(steps) > 5:
-        return None
-    root = steps[0]
-    intervals = tuple(x - root for x in steps)
-    fit = _canonical_integer_ji_from_step_intervals(intervals)
-    return fit.get('ratio_string') if fit else None
 
 
 def _prime_presence_summary_from_attacks(attacks):
@@ -641,7 +535,7 @@ def _print_compact_statistics(score, attack_analysis=None):
         sources=ann.get('energy_sources',{})
         if sources:
             print('Energy sources (initial -> final; delta):')
-            for key in ('background_chord_field_energy','attack_energy','sounding_energy','voice_leading_energy'):
+            for key in sources['initial']:
                 before=sources['initial'][key];after=sources['final'][key];delta=sources['delta'][key]
                 print(f'  {key}: {before:.6f} -> {after:.6f}; {delta:+.6f}')
 
@@ -720,7 +614,7 @@ def build_attack_interval_analysis(score):
                     'no legal three-integer construction found under the configured limits'
                 )
         elif len(steps) == 4:
-            canonical = _canonical_four_integer_ji_from_step_intervals(
+            canonical = _canonical_integer_ji_from_step_intervals(
                 tuple(interval_from_lowest)
             )
             canonical_subsets = _canonical_three_note_subsets(tuple(steps))
@@ -781,8 +675,7 @@ def build_attack_interval_analysis(score):
         },
         'canonical_ji_method': {
             'prime_limit': ATTACK_ANALYSIS_PRIME_LIMIT,
-            'integer_limit': None,
-            'precomputed_table': ATTACK_ANALYSIS_JI_TABLE_FILENAME,
+            'precomputed_table': str(_ACTIVE_JI_TABLE_PATH),
             'precomputed_table_loaded': _load_attack_ji_precomputed_table() is not None,
             'precomputed_table_loaded_path': (
                 (_load_attack_ji_precomputed_table() or {}).get('_loaded_path')
@@ -815,9 +708,6 @@ def _default_attack_analysis_path(score_filename):
     return p.with_name(p.stem + '_attacks' + suffix)
 
 
-def _can_build_historical_attack_analysis():
-    """Backward-compatible name: every configured scale now supports attack JI."""
-    return _ACTIVE_JI_TABLE is not None
 
 
 
@@ -831,17 +721,16 @@ def _ir_progression_argument(frontend):
 
 
 def generate_score(seed=20260811,bars=48,bpm=96,motif_degrees=None,time_signature='4/4',
-                   best_of=1,target_duration_seconds=None,cse_strength=1.15,cse_harmony_gain=1.0,
-                   allow_sixteenth=True,cleanup=False,deduplicate_unisons=False,best_of_workers=1,
+                   cse_strength=1.15,cse_harmony_gain=1.0,allow_sixteenth=True,
                    scale_config=None,cse_dir=None,cse_workers=None,rules_config=None,style_config=None,
                    chord_progression=None,frontend_ir=None,frontend_ir_output=None,
-                   frontend_mode='melodyplan',**legacy):
-    if cleanup or legacy.get('cse_iterative_optimize'):
-        raise ValueError('The fixed-melody annealing writer does not run pitch-changing cleanup/legacy optimization')
-    if best_of not in (None,1) or best_of_workers not in (None,1):
-        warnings.warn('Whole-score best-of is retired; one fixed melody is optimized by annealing',UserWarning)
-    if deduplicate_unisons:
-        warnings.warn('Post-hoc note deletion is disabled; strict voice ordering prevents unisons',UserWarning)
+                   imitation_reference=None,imitation_staff_id=None,
+                   imitation_beam_width=48,retune_melody_source=None,
+                   retune_staff_id=None):
+    sources = [frontend_ir is not None, imitation_reference is not None,
+               retune_melody_source is not None]
+    if sum(sources) > 1:
+        raise ValueError('frontend_ir, imitation_reference and retune_melody_source are mutually exclusive')
     frontend=None
     if frontend_ir is not None:
         from frontend_ir import load_ir,validate_ir
@@ -853,24 +742,26 @@ def generate_score(seed=20260811,bars=48,bpm=96,motif_degrees=None,time_signatur
     spec,manifest=_configure_adaptive_scale(scale_config,cse_dir,rules_config=rules_config,
         style_config=style_config,cse_strength=cse_strength,cse_harmony_gain=cse_harmony_gain,
         cse_workers=cse_workers,chord_progression=chord_progression)
-    retired=[k for k in spec.style.get('cse_weights',{}) if k.startswith('COUNTERPOINT_')]
-    if retired:
-        warnings.warn('Legacy cse_weights.COUNTERPOINT_* do not control the new writer; use style.annealing',UserWarning)
     from frontend_ir import save_ir,validate_ir
     if frontend is None:
-        ts,bpb=hr.normalize_time_signature(time_signature)
-        if bars is None:
-            bars=max(1,round(float(target_duration_seconds or 120)*float(bpm)/(60*bpb)))
-        if type(bars) is not int or bars<=0:raise ValueError('bars must be a positive integer')
         if not math.isfinite(bpm) or bpm<=0:raise ValueError('bpm must be positive')
-        if frontend_mode not in ('melodyplan','legacy'):
-            raise ValueError("frontend_mode must be 'melodyplan' or 'legacy'")
-        if frontend_mode == 'legacy':
-            from frontend_generate import generate_frontend_ir
+        if imitation_reference is not None:
+            from imitation_frontend import generate_frontend_ir
+            frontend=generate_frontend_ir(
+                imitation_reference,seed=int(seed),bpm=bpm,spec=spec,
+                staff_id=imitation_staff_id,beam_width=imitation_beam_width)
+        elif retune_melody_source is not None:
+            from retune_melody import generate_frontend_ir
+            frontend=generate_frontend_ir(
+                retune_melody_source,seed=int(seed),bpm=bpm,spec=spec,
+                staff_id=retune_staff_id)
         else:
             from joint_frontend_generate import generate_frontend_ir
-        frontend=generate_frontend_ir(int(seed),bars,bpm,motif_degrees,ts,
-                                      allow_sixteenth,spec)
+            ts,_=hr.normalize_time_signature(time_signature)
+            if type(bars) is not int or bars<=0:
+                raise ValueError('bars must be a positive integer')
+            frontend=generate_frontend_ir(
+                int(seed),bars,bpm,motif_degrees,ts,allow_sixteenth,spec)
     else:
         validate_ir(frontend,spec=spec)
     if frontend_ir_output is not None:
@@ -917,29 +808,25 @@ def _build_cli_parser():
     ap.add_argument('--seed',type=int,default=20260811);ap.add_argument('--bars',type=int,default=48)
     ap.add_argument('--bpm',type=float,default=96.0);ap.add_argument('--time-signature',default='4/4')
     ap.add_argument('--chord-progression',help='fixed degree/code loop; auto restores automatic harmony')
-    ap.add_argument('--best-of',type=int,default=1,help='deprecated; annealing uses one fixed melody')
-    ap.add_argument('--best-of-workers',type=int,default=1,help='deprecated')
     ap.add_argument('--cse-dir');ap.add_argument('--cse-workers',type=int)
     ap.add_argument('--output','-o',default='adaptive_score.json')
     ap.add_argument('--frontend-ir',
                     help='read ScaleWeaverFrontEndIR/1 and skip Lead/harmony generation')
     ap.add_argument('--save-frontend-ir',dest='frontend_ir_output',
                     help='write the generated/read front-end IR before accompaniment')
-    fg=ap.add_mutually_exclusive_group()
-    fg.add_argument('--melodyplan-frontend',dest='frontend_mode',action='store_const',
-                    const='melodyplan',help='hierarchical joint Lead/rhythm/harmony front end (default)')
-    fg.add_argument('--legacy-frontend',dest='frontend_mode',action='store_const',
-                    const='legacy',help='use the previous sequential front end')
-    ap.set_defaults(frontend_mode='melodyplan')
+    source=ap.add_mutually_exclusive_group()
+    source.add_argument('--imitate-rhythm','--imitate-mscx','--imitate-reference',
+                        dest='imitation_reference',
+                        help='MSCX or reference IR used as a rhythm/barline template')
+    source.add_argument('--retune-melody',dest='retune_melody_source',
+                        help='copy and minimum-RMS retune the complete source melody')
+    ap.add_argument('--imitation-staff-id')
+    ap.add_argument('--imitation-beam-width',type=int,default=48)
+    ap.add_argument('--retune-staff-id')
     g=ap.add_mutually_exclusive_group()
     g.add_argument('--allow-sixteenth',dest='allow_sixteenth',action='store_true')
     g.add_argument('--no-sixteenth',dest='allow_sixteenth',action='store_false')
     ap.set_defaults(allow_sixteenth=True)
-    cg=ap.add_mutually_exclusive_group()
-    cg.add_argument('--cleanup',dest='cleanup',action='store_true',help='unsupported with frozen melody')
-    cg.add_argument('--no-cleanup',dest='cleanup',action='store_false')
-    ap.set_defaults(cleanup=False)
-    ap.add_argument('--no-dedup',action='store_true',help='compatibility: no post-hoc deletion is performed')
     ap.add_argument('--no-statistics',dest='print_statistics',action='store_false',default=True)
     ap.add_argument('--attack-analysis',default=None)
     return ap
@@ -947,7 +834,7 @@ def _build_cli_parser():
 
 def cli(argv=None):
     a=vars(_build_cli_parser().parse_args(argv));filename=a.pop('output')
-    attack=a.pop('attack_analysis');a.pop('no_dedup')
+    attack=a.pop('attack_analysis')
     return save_score(filename=filename,attack_analysis_filename=attack,**a)
 
 if __name__=='__main__':

@@ -18,7 +18,6 @@ import json
 import math
 import re
 import copy
-import warnings
 
 
 
@@ -42,37 +41,6 @@ CSE_WEIGHT_DEFAULTS = {
     'COUNTERPOINT_EXTRA_OCTAVE_FAMILY_PAIR_COST': 4.60,
     'COUNTERPOINT_PARTIAL_OCTAVE_FAMILY_PAIR_COST': 3.10,
 }
-
-
-# Removed policies are accepted only for migration and never enter scoring.
-# This explicit registry prevents old profiles from silently restoring them.
-REMOVED_GENERATOR_FIELDS = frozenset((
-    'tonal_core_pcs','tonal_core_shares','tonal_core_memory','tonal_core_prior',
-    'tonal_core_response','tonal_core_target','lead_core_pc_targets',
-    'lead_core_freq_prior','lead_core_pc_gain','lead_core_total_gain',
-    'lead_core_count_gain','lead_core_base_bonus','lead_pc_target_normalize',
-    'pc_selection_reward',
-))
-REMOVED_HARMONY_FIELDS = frozenset((
-    'melody_7_colour_by_pc','chord_pc_log_reward','chord_presence_bonuses',
-    'prime_onset_cost','prime_release_cost','prime_memory_cost',
-    'chord_tone_7_colour_continuity_cost','established_colour_release_extra',
-    'prime_class_prior',
-))
-
-def _strip_removed_policies(rules):
-    metadata=rules.get('metadata',{})
-    removed=[]
-    for section,keys in (('generator',REMOVED_GENERATOR_FIELDS),
-                         ('harmony_style',REMOVED_HARMONY_FIELDS)):
-        values=metadata.get(section,{})
-        for key in sorted(keys & values.keys()):
-            values.pop(key)
-            removed.append(f'metadata.{section}.{key}')
-    if removed:
-        warnings.warn('Removed legacy scoring fields ignored: '+', '.join(removed)+
-                      '. Use style.lead_pc_target_distribution and style.prime_rewards.',
-                      UserWarning,stacklevel=3)
 
 
 def resolved_cse_weights(style):
@@ -183,19 +151,15 @@ class ScaleSpec:
 
     # Vertical hard-wolf collection.  Values are EDO-step interval classes:
     # abs(a-b) % edo == value is forbidden.
-    forbidden_intervals: tuple[int, ...] = ()
+    wolf_intervals: tuple[int, ...] = ()
 
     # Exact absolute step distances; no octave reduction or inversion folding.
     absolute_wolf_intervals: tuple[int, ...] = ()
 
-    # Cleanup degree distances count scale positions, independently of EDO steps.
+    # Soft-penalty degree distances count scale positions, independently of EDO steps.
     cleanup_degree_distances: tuple[int, ...] = ()
     cleanup_step_distances: tuple[int, ...] = ()
-    cleanup_passes: int = 8
-    cleanup_max_shift_degrees: dict[str, int] = field(default_factory=dict)
-    # Soft generation-time penalty for configured non-wolf special distances.
-    # These distances are *not* hard legality rules: generation may keep them
-    # when musically necessary, and the final cleanup pass is best-effort only.
+    # Generation may keep these configured non-wolf distances when necessary.
     cleanup_soft_penalty: float = 0.72
 
     # Melodic-direction grammar.  Kept as a compact user-editable dictionary so
@@ -243,9 +207,9 @@ class ScaleSpec:
             raise ValueError("names and pcs must have the same length")
         if not (float(self.base_freq_hz) > 0 and math.isfinite(float(self.base_freq_hz))):
             raise ValueError("base_freq_hz must be a positive finite number")
-        for x in self.forbidden_intervals:
+        for x in self.wolf_intervals:
             if not 0 < abs(int(x)) < edo:
-                raise ValueError("forbidden_intervals must be non-zero interval classes smaller than edo")
+                raise ValueError("wolf_intervals must be non-zero interval classes smaller than edo")
         for x in self.absolute_wolf_intervals:
             if isinstance(x, bool) or not isinstance(x, int) or x <= 0:
                 raise ValueError('wolf_absolute_intervals must contain positive integer step distances')
@@ -255,8 +219,6 @@ class ScaleSpec:
         for x in self.cleanup_step_distances:
             if int(x) <= 0:
                 raise ValueError("cleanup_step_distances must be positive")
-        if int(self.cleanup_passes) < 0:
-            raise ValueError("cleanup_passes must be >= 0")
         if not (math.isfinite(float(self.cleanup_soft_penalty)) and float(self.cleanup_soft_penalty) >= 0.0):
             raise ValueError("cleanup_soft_penalty must be a finite non-negative number")
         # Force validation of the two functional-harmony partitions now, so
@@ -342,7 +304,7 @@ class ScaleSpec:
 
     @cached_property
     def wolf_interval_classes(self) -> frozenset[int]:
-        return frozenset(abs(int(x)) % self.edo for x in self.forbidden_intervals)
+        return frozenset(abs(int(x)) % self.edo for x in self.wolf_intervals)
 
     def is_octave_equivalent_wolf(self, a: int, b: int) -> bool:
         return abs(int(a) - int(b)) % self.edo in self.wolf_interval_classes
@@ -351,12 +313,6 @@ class ScaleSpec:
         distance = abs(int(a) - int(b))
         return (distance in self.absolute_wolf_intervals
                 or self.is_octave_equivalent_wolf(a, b))
-
-    def resolved_cleanup_max_shift_degrees(self) -> dict[str, int]:
-        defaults = {"lead": 4, "counter": 5, "inner": 6, "bass": 6}
-        for voice, value in (self.cleanup_max_shift_degrees or {}).items():
-            defaults[str(voice)] = max(0, int(value))
-        return defaults
 
     def resolved_melody(self) -> dict[str, Any]:
         # Values are in scale degrees, so the same grammar scales naturally from
@@ -500,8 +456,7 @@ class ScaleSpec:
         return out
 
     def resolved_ensemble_voices(self) -> tuple[str, ...]:
-        # Five-part configurations opt in merely by declaring an inner2 range;
-        # old four-part JSON remains byte-for-byte compatible.
+        # Five-part configurations opt in by declaring an inner2 range.
         if 'inner2' in (self.voice_ranges or {}):
             return ("bass", "inner", "inner2", "counter", "lead")
         return ("bass", "inner", "counter", "lead")
@@ -608,17 +563,10 @@ def _load_flat(data: dict, config_dir=None, style_dir=None, rules=None, style=No
     inner = data.get("cse_inner_bounds")
     five = data.get("cse_five_bounds")
 
-    # Accept both the simple top-level fields and a nested cleanup object.
     cleanup = dict(data.get("cleanup") or {})
     degree_cleanup = data.get("cleanup_degree_distances", cleanup.get("degree_distances", ()))
     step_cleanup = data.get("cleanup_step_distances", cleanup.get("step_distances", ()))
-    cleanup_passes = data.get("cleanup_passes", cleanup.get("passes", 8))
-    cleanup_shifts = data.get("cleanup_max_shift_degrees", cleanup.get("max_shift_degrees", {}))
     cleanup_soft_penalty = data.get("cleanup_soft_penalty", cleanup.get("soft_penalty", 0.72))
-
-    # "wolf_intervals" is accepted as a clearer alias, but old
-    # forbidden_intervals configs continue to work.
-    wolves = data.get("wolf_intervals", data.get("forbidden_intervals", ()))
 
     return ScaleSpec(
         id=str(data.get("id") or f"edo{edo}_{'-'.join(map(str, pcs))}"),
@@ -629,12 +577,10 @@ def _load_flat(data: dict, config_dir=None, style_dir=None, rules=None, style=No
         base_freq_hz=float(data["base_freq_hz"]),
         base_note=str(data["base_note"]),
         voice_ranges=voice_ranges,
-        forbidden_intervals=_tuple_ints(wolves),
+        wolf_intervals=_tuple_ints(data.get("wolf_intervals", ())),
         absolute_wolf_intervals=tuple(data.get("wolf_absolute_intervals", ())),
         cleanup_degree_distances=_tuple_ints(degree_cleanup),
         cleanup_step_distances=_tuple_ints(step_cleanup),
-        cleanup_passes=int(cleanup_passes),
-        cleanup_max_shift_degrees={str(k): int(v) for k, v in (cleanup_shifts or {}).items()},
         cleanup_soft_penalty=float(cleanup_soft_penalty),
         melody=dict(data.get("melody") or {}),
         ngram_file=(None if data.get("ngram_file") is None else str(data.get("ngram_file"))),
@@ -693,16 +639,15 @@ def load_scale(path_or_dict, *, rules=None, style=None, require_composition=Fals
             if require_composition or sibling.is_file(): style = sibling
     rule_data, rule_dir = _read_json(rules or {'format':'CompositionRules/1','scale_id':sid}, 'CompositionRules/1')
     style_data, style_dir = _read_json(style or {'format':'CompositionStyle/1','scale_id':sid}, 'CompositionStyle/1')
-    allowed_rules = {'format','scale_id','voice_ranges','wolf_intervals','forbidden_intervals','wolf_absolute_intervals',
-                     'cleanup','cleanup_degree_distances','cleanup_step_distances','cleanup_passes',
-                     'cleanup_max_shift_degrees','cleanup_soft_penalty','melody','harmony',
-                     'cse_wide_bounds','cse_inner_bounds','cse_five_bounds','metadata','runtime','voicebank','se_parameters','spectral_parameters'}
+    allowed_rules = {'format','scale_id','voice_ranges','wolf_intervals','wolf_absolute_intervals',
+                     'cleanup','cleanup_degree_distances','cleanup_step_distances',
+                     'cleanup_soft_penalty','melody','harmony',
+                     'cse_wide_bounds','cse_inner_bounds','cse_five_bounds','metadata','runtime','voicebank','spectral_parameters'}
     for data, allowed in ((rule_data, allowed_rules),(style_data, STYLE_FIELDS)):
         if data.get('scale_id') != sid:
             raise ValueError(f'{data["format"]}.scale_id must match {sid!r}')
         if set(data) - allowed:
             raise ValueError(f'Unknown {data["format"]} fields: {sorted(set(data)-allowed)}')
-    _strip_removed_policies(rule_data)
     generator = rule_data.get('metadata', {}).get('generator', {})
     misplaced = set(generator) & {'prime_rewards','lead_pc_target_distribution','ngram_file'}
     if misplaced:
@@ -739,12 +684,6 @@ def load_scale(path_or_dict, *, rules=None, style=None, require_composition=Fals
     runtime = rule_data.get('runtime', {})
     from spectral_model import resolve_parameters
     resolve_parameters(rule_data.get('spectral_parameters'))
-    if 'se_parameters' in rule_data:
-        from se_model import resolve_parameters as legacy_se_parameters
-        legacy_se_parameters(rule_data['se_parameters'])
-        warnings.warn('rules.se_parameters is retired and ignored by the unified model; '
-                      'use rules.spectral_parameters (fixed sigma_hz, default 1.0)',
-                      UserWarning, stacklevel=2)
     runtime_keys = {'COUNTERPOINT_LOOKAHEAD_MAX_OCTAVE_FAMILY_PAIRS'}
     if set(runtime) & {'CSE_2D_A','CSE_2D_B','CSE_2D_C'}:
         raise ValueError('Move CSE_2D_A/B/C from rules.runtime to style.cse_weights')

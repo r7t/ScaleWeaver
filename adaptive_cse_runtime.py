@@ -1,4 +1,4 @@
-"""CSE runtime/evaluator extracted from score_builder_attack_cse_no_ji_prior_v9.py.
+"""Runtime spectral evaluator used by score generation.
 
 This module owns every CSE lookup adapter and every CSE-derived weighting term
 used by score generation: virtual chord-field CSE, actual-register CSE,
@@ -10,28 +10,22 @@ does not import ``score_builder`` so the dependency direction stays one-way:
 
     score_builder -> adaptive_cse_runtime -> harmony_rhythm
 
-The public compatibility functions that main.py historically obtained from
-score_builder are re-exported by the split score_builder.
 """
 from __future__ import annotations
 
-import json
 import math
-import os
-from pathlib import Path
 from functools import lru_cache
 from itertools import combinations
 
 import harmony_rhythm as hr
-import ji_ratio
 from harmony_rhythm import CHORDS, OCT, POOLS
-from scale_config import (CSE_WEIGHT_DEFAULTS, resolved_cse_weights,
+from scale_config import (resolved_cse_weights,
                           resolved_attack_cse_percentile_limits)
-from spectral_model import score_steps, resolve_parameters
-from spectral_bundle import numerical_signature, _bundle_covers_spec_data
+from spectral_model import resolve_parameters
+from spectral_bundle import _bundle_covers_spec_data
 
 # ---------------------------------------------------------------------------
-# Editable CSE weights.  These were moved verbatim from score_builder v9.
+# Active spectral weights, rebound from the selected style at configuration time.
 # ---------------------------------------------------------------------------
 globals().update(resolved_cse_weights({}))
 ATTACK_CSE_PERCENTILE_LIMITS = {}
@@ -43,58 +37,12 @@ ATTACK_CSE_PERCENTILE_LIMITS = {}
 _SPECTRAL_PARAMETERS = resolve_parameters()
 
 
-def _se_score(steps):
-    """Direct diagnostic only; composition uses the unified native tables."""
-    return float(score_steps(steps, hr.OCT, _SPECTRAL_PARAMETERS)[0])
-
-
-def _se_native_entry(steps, table_key):
-    return hr.CSE.entry(steps, metric='se', table_key=table_key) if hr.CSE else None
-
-
-def _ccse_native_entry(steps, table_key):
-    return hr.CSE.entry(steps, metric='ccse', table_key=table_key) if hr.CSE else None
-
-
-def spectral_metrics_entry(steps, *, table_key=None):
-    """Unblended baseline-corrected metrics at the supplied absolute register."""
-    row = hr.CSE.metrics_entry(steps, table_key=table_key) if hr.CSE else None
-    return {m:item[0] for m,item in row.items()} if row else None
-
-
 def _blend_raw_cse_se(raw_cse, raw_se, raw_ccse):
     return (float(CSE_2D_A)*float(raw_cse) + float(CSE_2D_B)*float(raw_se)
             + float(CSE_2D_C)*float(raw_ccse))
 
 
-def cse_se_blend_parameters():
-    """Legacy API name retained for callers and previously saved statistics."""
-    return {'a':float(CSE_2D_A), 'b':float(CSE_2D_B), 'c':float(CSE_2D_C),
-            'formula':'a*CSE + b*SE + c*CCSE',
-            'coefficient_semantics':{'a':'CSE','b':'SE','c':'CCSE'},
-            'se_backend':'unified-spectral-native-colex' if hr.CSE else None,
-            'spectral_parameters':dict(_SPECTRAL_PARAMETERS),
-            'spectral_numerical_signature':hr.CSE.data['numerical_signature'] if hr.CSE else None}
-
-# ---------------------------------------------------------------------------
-# Editable prime-limit rewards.
-#
-# Positive values are rewards and therefore LOWER candidate cost.  They are
-# deliberately independent from CSE strength so each prime colour can be tuned
-# directly in ordinary score-cost units.  All default to zero, preserving the
-# pre-existing generator until explicitly enabled.
-# ---------------------------------------------------------------------------
-PRIME_2_REWARD = 0.0
-PRIME_3_REWARD = 0.0
-PRIME_5_REWARD = 0.0
-PRIME_7_REWARD = 0.0
-PRIME_11_REWARD = 0.0
-PRIME_13_REWARD = 0.0
-PRIME_17_REWARD = 0.0
-
 ATTACK_JI_PRIMES = (2, 3, 5, 7, 11, 13, 17)
-ATTACK_JI_TABLE_FILENAME = None  # scale-specific; configured at runtime
-ATTACK_JI_TABLE_ENV = 'ADAPTIVE_ATTACK_JI_TABLE'
 _ACTIVE_JI_TABLE = None
 _ACTIVE_JI_TABLE_PATH = None
 
@@ -106,7 +54,7 @@ COUNTERPOINT_LOOKAHEAD_MAX_OCTAVE_FAMILY_PAIRS = 1
 COUNTERPOINT_EFFECTIVE_RANGES = {}
 
 
-def configure_scale(spec, ji_table_path=None, *, se_dir=None, se_workers=None):
+def configure_scale(spec, ji_table):
     """Rebind scale globals and attach the scale-specific canonical JI map."""
     global CHORDS, OCT, POOLS, COUNTERPOINT_EFFECTIVE_RANGES, _VOICE_RANK
     global _ACTIVE_JI_TABLE, _ACTIVE_JI_TABLE_PATH
@@ -119,8 +67,6 @@ def configure_scale(spec, ji_table_path=None, *, se_dir=None, se_workers=None):
         value = float(runtime.get(key, default))
         if not math.isfinite(value): raise ValueError(f'Non-finite runtime.{key}')
         globals()[key] = int(value) if isinstance(default,int) else value
-    for prime in ATTACK_JI_PRIMES:
-        globals()[f'PRIME_{prime}_REWARD'] = float(spec.style.get('prime_rewards', {}).get(str(prime), 0.0))
     CHORDS = hr.CHORDS
     OCT = hr.OCT
     POOLS = hr.POOLS
@@ -130,15 +76,10 @@ def configure_scale(spec, ji_table_path=None, *, se_dir=None, se_workers=None):
     else:
         r=spec.resolved_voice_ranges(); COUNTERPOINT_EFFECTIVE_RANGES={k:tuple(r[k]) for k in spec.resolved_ensemble_voices()[:-1]}
     _VOICE_RANK={voice:i for i,voice in enumerate(spec.resolved_ensemble_voices())}
-    if isinstance(ji_table_path, ji_ratio.JITable):
-        _ACTIVE_JI_TABLE = ji_table_path
-        _ACTIVE_JI_TABLE_PATH = ji_table_path.path
-    else:
-        if ji_table_path is None:
-            env = os.environ.get(ATTACK_JI_TABLE_ENV)
-            ji_table_path = Path(env) if env else ji_ratio.ensure_table(spec, Path('.') / 'ji_cache')
-        _ACTIVE_JI_TABLE_PATH = Path(ji_table_path).expanduser().resolve()
-        _ACTIVE_JI_TABLE = ji_ratio.JITable(_ACTIVE_JI_TABLE_PATH, spec)
+    if ji_table is None or not hasattr(ji_table, 'lookup') or not hasattr(ji_table, 'data'):
+        raise TypeError('configure_scale requires a loaded JI table')
+    _ACTIVE_JI_TABLE = ji_table
+    _ACTIVE_JI_TABLE_PATH = ji_table.path
     if hr.CSE is None or not _bundle_covers_spec_data(hr.CSE.data, spec):
         raise ValueError('Configure a unified SE/CSE/CCSE bundle covering the active pitch domains first')
     # Clear all context-dependent memoized values, including completion search.
@@ -162,39 +103,13 @@ def overlaps(events, start, end):
             and e['start_beat'] + e['duration_beats'] > start + 1e-9]
 
 
-def _prime_reward_weights(override=None):
-    """Resolve current prime rewards, optionally from the caller.
-
-    ``score_builder`` passes its own seven user-facing knobs explicitly.  This
-    avoids a very easy Python deployment failure where the user edits one copy
-    of this runtime while the active score_builder imports another copy/module
-    name.  Direct runtime users may still omit ``override`` and use the legacy
-    module globals below.
-    """
-    defaults = {
-        2: float(PRIME_2_REWARD),
-        3: float(PRIME_3_REWARD),
-        5: float(PRIME_5_REWARD),
-        7: float(PRIME_7_REWARD),
-        11: float(PRIME_11_REWARD),
-        13: float(PRIME_13_REWARD),
-        17: float(PRIME_17_REWARD),
-    }
-    if override is None:
-        return defaults
-    out = {}
-    for p, default in defaults.items():
-        if p in override:
-            out[p] = float(override[p])
-        elif str(p) in override:
-            out[p] = float(override[str(p)])
-        else:
-            out[p] = default
-    return out
+def _prime_reward_weights(values):
+    return {p:float(values.get(p, values.get(str(p), 0.0)))
+            for p in ATTACK_JI_PRIMES}
 
 
-def _prime_rewards_enabled(override=None):
-    return any(abs(x) > 1e-15 for x in _prime_reward_weights(override).values())
+def _prime_rewards_enabled(values):
+    return any(abs(x) > 1e-15 for x in _prime_reward_weights(values).values())
 
 
 def _prime_bit(prime):
@@ -291,39 +206,6 @@ def interval_prime_mask(step_difference):
     return int(mask)
 
 
-def interval_prime_presence(step_difference):
-    """Public {prime: bool} diagnostic for one directed/undirected step size."""
-    mask = interval_prime_mask(abs(int(step_difference)))
-    return {p: bool(mask & _prime_bit(p)) for p in ATTACK_JI_PRIMES}
-
-
-def interval_attack_ji_ratio(step_difference):
-    """Human-readable JSON-derived canonical dyad ratio, with octave extension."""
-    diff = abs(int(step_difference))
-    if diff == 0:
-        return '1/1'
-    octaves, residue = divmod(diff, int(OCT))
-    if residue:
-        ratio = _load_attack_ji_dyad_index()['dyads'][int(residue)]['ratio']
-        if '/' in ratio:
-            num, den = (int(x) for x in ratio.split('/', 1))
-        else:
-            num, den = int(ratio), 1
-        num *= 2 ** octaves
-    else:
-        num, den = 2 ** octaves, 1
-    g = math.gcd(num, den)
-    return f'{num // g}/{den // g}'
-
-
-def _interval_prime_reward(a, b):
-    """Reward attached to one pairwise interval."""
-    mask = interval_prime_mask(abs(int(a) - int(b)))
-    weights = _prime_reward_weights()
-    return sum(weights[p] for p in ATTACK_JI_PRIMES
-               if mask & _prime_bit(p))
-
-
 def _sonority_prime_mask(steps):
     """Prime-presence mask of the whole actual sonority.
 
@@ -352,7 +234,7 @@ def _sonority_prime_mask(steps):
     return int(mask)
 
 
-def _sonority_prime_reward(steps, prime_rewards=None):
+def _sonority_prime_reward(steps, prime_rewards):
     """Sum each configured prime reward once when the whole ratio contains it."""
     mask = _sonority_prime_mask(steps)
     weights = _prime_reward_weights(prime_rewards)
@@ -360,7 +242,7 @@ def _sonority_prime_reward(steps, prime_rewards=None):
                if mask & _prime_bit(p))
 
 
-def _sounding_prime_reward_interval(cand, existing, start, dur, prime_rewards=None):
+def _sounding_prime_reward_interval(cand, existing, start, dur, prime_rewards):
     """Duration-weighted prime reward of all notes actually sounding with cand."""
     cand = int(cand)
     start = float(start)
@@ -385,7 +267,7 @@ def _sounding_prime_reward_interval(cand, existing, start, dur, prime_rewards=No
     return weighted / total if total > 1e-9 else 0.0
 
 
-def attack_aware_prime_reward_interval(cand, existing, start, dur, prime_rewards=None):
+def attack_aware_prime_reward_interval(cand, existing, start, dur, prime_rewards):
     """Prime-colour analogue of ``attack_aware_vertical_cse_interval``.
 
     The same three real contexts are used:
@@ -442,7 +324,7 @@ def attack_aware_prime_reward_interval(cand, existing, start, dur, prime_rewards
     }
 
 
-def attack_aware_prime_reward_cost(cand, existing, start, dur, prime_rewards=None):
+def attack_aware_prime_reward_cost(cand, existing, start, dur, prime_rewards):
     """Convert positive prime reward into a negative candidate cost.
 
     This must never silently short-circuit to zero when nonzero prime rewards
@@ -462,20 +344,6 @@ def hard_wolf(a, b):
 def step_second(a, b):
     d = abs(int(a) - int(b))
     return 0 < d <= hr.SECOND_MAX_STEP
-
-
-def chord_cse_score(chord):
-    """Weighted SE/CSE/CCSE score of the chord's reference voicing."""
-    steps = tuple(hr.chord_reference_steps(chord))
-    item = absolute_cse_entry(steps)
-    return float(item[0]) if item is not None else 2.0
-
-
-def vertical_cse_score(chord, step):
-    """Weighted SE/CSE/CCSE score of chord reference voicing plus one pitch."""
-    steps = tuple(hr.chord_reference_steps(chord)) + (int(step),)
-    item = absolute_cse_entry(steps)
-    return float(item[0]) if item is not None else 2.4
 
 
 def _effective_pool(voice):
@@ -1140,97 +1008,10 @@ def _three_part_relative_floor_interval(voice, cand, existing, start, dur):
         covered += span
     return (weighted / covered, covered / max(1e-9, float(dur))) if covered else (None, 0.0)
 
-def four_part_relative_purity_summary(voices):
-    """Duration-weighted realised quartet CSE + deletion-floor diagnostics."""
-    if not voices.get('counter'):
-        return {'mean_raw_cse': None, 'mean_relative_floor_cse3': None, 'covered_duration': 0.0}
-    selected = ('bass', 'inner', 'counter', 'lead')
-    points = set()
-    for v in selected:
-        for e in voices.get(v, []):
-            points.add(float(e['start_beat']))
-            points.add(float(e['start_beat']) + float(e['duration_beats']))
-    points = sorted(points)
-    raw_w = rel_w = covered = rel_covered = 0.0
-    metric_w = dict.fromkeys(('se','cse','ccse'), 0.0)
-    # Duration-weighted identity of the tone whose deletion exposes the
-    # lowest-CSE triad (i.e. the least integrated / easiest-to-delete voice).
-    # Ties are split equally so tuple order cannot create a voice bias.
-    deleted_voice_duration = {'bass': 0.0, 'inner': 0.0, 'counter': 0.0, 'lead': 0.0}
-    deletion_tie_duration = 0.0
-    for a, b in zip(points, points[1:]):
-        if b <= a + 1e-9:
-            continue
-        mid = .5 * (a + b)
-        q = []
-        for v in selected:
-            act = [e for e in voices.get(v, [])
-                   if float(e['start_beat']) < mid + 1e-9
-                   and float(e['start_beat']) + float(e['duration_beats']) > mid - 1e-9]
-            if not act:
-                q = []
-                break
-            q.append(int(act[0]['step']))
-        if len(q) != 4:
-            continue
-        raw = _absolute_cse_score(tuple(q), default=None)
-        if raw is None:
-            continue
-        span = b - a
-        raw_w += span * float(raw)
-        metrics = spectral_metrics_entry(tuple(q))
-        for m in metric_w: metric_w[m] += span * metrics[m]
-        covered += span
-        # Keep the voice identity here rather than using
-        # _four_note_relative_floor(), which sorts pitches and intentionally
-        # discards voice labels for cached objective evaluation.
-        deletion_vals = []
-        for i in range(4):
-            sub = tuple(q[:i] + q[i + 1:])
-            sub_raw = _absolute_cse_score(sub, default=None)
-            if sub_raw is None:
-                deletion_vals = []
-                break
-            deletion_vals.append(float(sub_raw))
-        if len(deletion_vals) == 4:
-            rel = min(deletion_vals)
-            rel_w += span * rel
-            rel_covered += span
-            tol = 1e-12 * max(1.0, abs(rel))
-            winners = [i for i, value in enumerate(deletion_vals)
-                       if abs(value - rel) <= tol]
-            if len(winners) > 1:
-                deletion_tie_duration += span
-            share = span / len(winners)
-            voice_labels = ('bass', 'inner', 'counter', 'lead')
-            for i in winners:
-                deleted_voice_duration[voice_labels[i]] += share
-    deleted_voice_ratio = {
-        voice: (dur / rel_covered if rel_covered else 0.0)
-        for voice, dur in deleted_voice_duration.items()
-    }
-    return {
-        'mean_raw_cse': raw_w / covered if covered else None,
-        'mean_blended_score': raw_w / covered if covered else None,
-        'mean_spectral_metrics': {m:v/covered if covered else None for m,v in metric_w.items()},
-        'mean_relative_floor_cse3': rel_w / rel_covered if rel_covered else None,
-        'covered_duration': covered,
-        'deleted_voice_duration': deleted_voice_duration,
-        'deleted_voice_ratio': deleted_voice_ratio,
-        'deletion_tie_duration': deletion_tie_duration,
-        'deletion_tie_ratio': deletion_tie_duration / rel_covered if rel_covered else 0.0,
-        'absolute_weight': float(COUNTERPOINT_FOUR_PART_RAW_CSE_WEIGHT),
-        'relative_purity_weight': float(COUNTERPOINT_RELATIVE_PURITY_WEIGHT),
-        'cse_se_blend': cse_se_blend_parameters(),
-        'definition': 'all raw CSE values are a*CSE+b*SE+c*CCSE; lower quartet blended score is better; higher minimum blended score among one-tone-deleted triples is better',
-    }
-
-
 # ---------------------------------------------------------------------------
 # Weighted-cost API used by score_builder.  Weight arithmetic lives here so
 # score_builder is responsible only for non-CSE musical rules and candidate
-# selection.  Components are returned in v9 addition order to preserve floating
-# behaviour as closely as possible.
+# selection.
 # ---------------------------------------------------------------------------
 
 def lead_chord_field_cost(chord, cand, strong):
@@ -1240,64 +1021,10 @@ def lead_chord_field_cost(chord, cand, strong):
     return hr._CSE_STRENGTH * field_w * (cse - LEAD_CHORD_FIELD_CSE_CENTER)
 
 
-def harmonizer_cse_cost_components(voice, cand, existing, start, dur, prime_rewards=None):
-    """CSE-only vertical cost for harmonizing a fixed imported melody.
-
-    This intentionally omits the virtual CHORDS/harmony-plan background field.
-    It uses only realised/attack-aware CSE, optimistic quartet completion,
-    deletion-floor relative purity and octave-family anti-collapse.
-    """
-    key = 'counter' if str(voice).startswith('counter') else str(voice)
-    actual_w = COUNTERPOINT_ACTUAL_CSE_WEIGHT[key]
-    out = []
-
-    actual, coverage, _ = attack_aware_vertical_cse_interval(
-        cand, existing, start, dur)
-    if actual is not None and coverage > 0:
-        out.append(hr._CSE_STRENGTH * actual_w * actual)
-
-    # Adjustable 2/3/5/7/11/13/17-limit colour reward over the same real
-    # sounding / simultaneous-attack / future-attack views as attack-aware CSE.
-    prime_cost = attack_aware_prime_reward_cost(cand, existing, start, dur, prime_rewards)
-    if prime_cost:
-        out.append(prime_cost)
-
-    partial_octave_excess = _partial_octave_family_excess_interval(
-        cand, existing, start, dur)
-    out.append(hr._CSE_STRENGTH * COUNTERPOINT_PARTIAL_OCTAVE_FAMILY_PAIR_COST
-               * partial_octave_excess)
-
-    projected_q, projected_cov = _projected_four_part_objective_interval(
-        voice, cand, existing, start, dur)
-    if projected_q is not None and projected_cov > 0:
-        out.append(hr._CSE_STRENGTH * projected_q)
-
-    triple_rel, triple_cov = _three_part_relative_floor_interval(
-        voice, cand, existing, start, dur)
-    if triple_rel is not None and triple_cov > 0:
-        out.append(-hr._CSE_STRENGTH * COUNTERPOINT_RELATIVE_PURITY_WEIGHT
-                   * triple_rel)
-
-    quartet_raw, quartet_rel, quartet_cov, octave_excess = _four_part_raw_cse_interval(
-        voice, cand, existing, start, dur)
-    if quartet_raw is not None and quartet_cov > 0:
-        out.append(hr._CSE_STRENGTH * COUNTERPOINT_FOUR_PART_RAW_CSE_WEIGHT
-                   * quartet_raw)
-        if quartet_rel is not None:
-            out.append(-hr._CSE_STRENGTH * COUNTERPOINT_RELATIVE_PURITY_WEIGHT
-                       * quartet_rel)
-        out.append(hr._CSE_STRENGTH * COUNTERPOINT_EXTRA_OCTAVE_FAMILY_PAIR_COST
-                   * octave_excess)
-    return tuple(out)
-
-
 
 def counterpoint_post_melodic_cost_components(voice, cand, chord, existing,
-                                                start, dur, prime_rewards=None):
-    """Return weighted CSE costs in the exact order used by score_builder v9.
-
-    Components are returned sequentially after the non-CSE melodic terms.
-    """
+                                                start, dur, prime_rewards):
+    """Return weighted spectral costs after the melodic terms."""
     key = 'counter' if str(voice).startswith('counter') else str(voice)
     bg_w = COUNTERPOINT_BACKGROUND_CSE_WEIGHT[key]
     actual_w = COUNTERPOINT_ACTUAL_CSE_WEIGHT[key]

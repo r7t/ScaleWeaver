@@ -2,7 +2,7 @@
 
 The front end owns the harmony progression, Lead rhythm and Lead pitches.  The
 accompaniment stage treats all three as immutable input and creates the three
-lower lines plus their annealed pitches.
+or four lower lines plus their annealed pitches.
 """
 from __future__ import annotations
 
@@ -11,6 +11,8 @@ import hashlib
 import json
 import math
 from pathlib import Path
+
+from measure_timeline import resolved_measure_map, total_beats, uniform_measure_map
 
 
 FORMAT = "ScaleWeaverFrontEndIR/1"
@@ -41,16 +43,20 @@ def scale_identity(spec):
     }
 
 
-def lead_rhythm_bars(lead, bars, beats_per_bar):
+def lead_rhythm_bars(lead, bars, beats_per_bar, measure_map=None,
+                     time_signature="4/4"):
     """Expose the Lead timing skeleton independently of its pitch fields."""
-    bpb = float(beats_per_bar)
+    timeline = (uniform_measure_map(bars, beats_per_bar, time_signature)
+                if measure_map is None else measure_map)
+    starts = [float(row["start_beat"]) for row in timeline]
     rows = [{"bar": bar, "events": []} for bar in range(int(bars))]
     for event_index, event in enumerate(lead):
         start = float(event["start_beat"])
-        bar = min(int(bars) - 1, max(0, int(math.floor((start + EPS) / bpb))))
+        import bisect
+        bar = min(int(bars) - 1, max(0, bisect.bisect_right(starts, start + EPS) - 1))
         rows[bar]["events"].append({
             "event_index": int(event_index),
-            "offset": round(start - bar * bpb, 10),
+            "offset": round(start - starts[bar], 10),
             "duration_beats": float(event["duration_beats"]),
         })
     return rows
@@ -58,11 +64,13 @@ def lead_rhythm_bars(lead, bars, beats_per_bar):
 
 def build_ir(*, seed, bpm, time_signature, beats_per_bar, bars, spec,
              harmony_plan, lead, allow_sixteenth, lead_palette=None,
-             motif_degrees=None, generator="legacy_frontend",
-             melody_plan=None, generator_metadata=None):
+             motif_degrees=None, generator="melodyplan_joint",
+             melody_plan=None, generator_metadata=None, measure_map=None):
     """Build a JSON-serializable IR from one front-end realization."""
     bars = int(bars)
     bpb = float(beats_per_bar)
+    timeline = (uniform_measure_map(bars, bpb, time_signature)
+                if measure_map is None else copy.deepcopy(measure_map))
     data = {
         "format": FORMAT,
         "seed": int(seed),
@@ -70,7 +78,8 @@ def build_ir(*, seed, bpm, time_signature, beats_per_bar, bars, spec,
         "time_signature": str(time_signature),
         "beats_per_bar": bpb,
         "bars": bars,
-        "duration_seconds": bars * bpb * 60.0 / float(bpm),
+        "duration_seconds": total_beats(timeline) * 60.0 / float(bpm),
+        "measure_map": timeline,
         "scale": scale_identity(spec),
         "generator": {
             "name": str(generator),
@@ -83,7 +92,7 @@ def build_ir(*, seed, bpm, time_signature, beats_per_bar, bars, spec,
         "lead": copy.deepcopy(lead),
         "lead_rhythm": {
             "representation": "per_bar_event_timing",
-            "bars": lead_rhythm_bars(lead, bars, bpb),
+            "bars": lead_rhythm_bars(lead, bars, bpb, timeline, time_signature),
             "palette": copy.deepcopy(lead_palette),
         },
     }
@@ -109,7 +118,7 @@ def _validate_scale(data, spec):
         raise FrontEndIRError("IR base frequency does not match the active scale")
 
 
-def _validate_harmony(plan, bars, bpb, chord_ids):
+def _validate_harmony(plan, bars, measure_map, chord_ids):
     if not isinstance(plan, list) or len(plan) != bars:
         raise FrontEndIRError(f"harmony_plan must contain exactly {bars} bars")
     for bar, row in enumerate(plan):
@@ -131,14 +140,14 @@ def _validate_harmony(plan, bars, bpb, chord_ids):
             if chord_ids is not None and chord_id not in chord_ids:
                 raise FrontEndIRError(f"IR chord {chord_id!r} is absent from the active scale")
             cursor = offset + duration
-        if not math.isclose(cursor, bpb, abs_tol=EPS):
+        expected_duration = float(measure_map[bar]["duration_beats"])
+        if not math.isclose(cursor, expected_duration, abs_tol=EPS):
             raise FrontEndIRError(f"harmony_plan[{bar}] does not fill the bar")
 
 
-def _validate_lead(lead, bars, bpb):
+def _validate_lead(lead, total):
     if not isinstance(lead, list) or not lead:
         raise FrontEndIRError("lead must be a non-empty event list")
-    total = bars * bpb
     previous_start = -math.inf
     previous_end = -math.inf
     for index, event in enumerate(lead):
@@ -159,11 +168,12 @@ def _validate_lead(lead, bars, bpb):
         previous_end = start + duration
 
 
-def _validate_rhythm(data, lead, bars, bpb):
+def _validate_rhythm(data, lead, bars, bpb, measure_map):
     rhythm = data.get("lead_rhythm")
     if not isinstance(rhythm, dict):
         raise FrontEndIRError("lead_rhythm must be an object")
-    expected = lead_rhythm_bars(lead, bars, bpb)
+    expected = lead_rhythm_bars(
+        lead, bars, bpb, measure_map, data.get("time_signature", "4/4"))
     if rhythm.get("bars") != expected:
         raise FrontEndIRError("lead_rhythm does not match the Lead event timing")
 
@@ -179,6 +189,10 @@ def validate_ir(data, *, spec=None, chord_ids=None):
     bpm = _finite(data.get("tempo_bpm"), "tempo_bpm")
     if bpb <= 0 or bpm <= 0:
         raise FrontEndIRError("beats_per_bar and tempo_bpm must be positive")
+    try:
+        measure_map = resolved_measure_map(data)
+    except (ValueError, TypeError, KeyError) as exc:
+        raise FrontEndIRError(str(exc)) from exc
     if spec is not None:
         _validate_scale(data, spec)
         if chord_ids is None:
@@ -187,9 +201,9 @@ def validate_ir(data, *, spec=None, chord_ids=None):
                 chord_ids = set(hr.CHORDS)
             except Exception:
                 chord_ids = None
-    _validate_harmony(data.get("harmony_plan"), bars, bpb, chord_ids)
-    _validate_lead(data.get("lead"), bars, bpb)
-    _validate_rhythm(data, data["lead"], bars, bpb)
+    _validate_harmony(data.get("harmony_plan"), bars, measure_map, chord_ids)
+    _validate_lead(data.get("lead"), total_beats(measure_map))
+    _validate_rhythm(data, data["lead"], bars, bpb, measure_map)
     if "melody_plan" in data:
         from melody_plan import validate as validate_melody_plan
         plan = validate_melody_plan(data["melody_plan"])

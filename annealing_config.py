@@ -3,10 +3,27 @@ import copy
 import math
 
 DEFAULTS = {
+    'harmonic_realization': {
+        'enabled': True, 'weight': 2.0, 'bass_root': 1.5,
+        'accompaniment_coverage': 1.0, 'accompaniment_membership': 0.75,
+        'joint_coverage': 0.75, 'anchor_multiplier': 2.0,
+        'cadence_multiplier': 3.0, 'final_multiplier': 5.0,
+        'melody_tonic_cadence': True,
+    },
     'enabled': True,
-    # Deprecated compatibility input. It is retained so older style files
-    # still load, but the optimizer now uses worst_subset_cse_weights below.
-    'subset_correction': {'triad': 1/3, 'tetrad': 1/3, 'pentad': 1/3},
+    'prime_salience': {
+        'weight_5': 0.0, 'weight_7': 0.0, 'joint_weight': 0.0,
+        'interval_rewards': {
+            '3/2': 0.0, '4/3': 0.0, '5/4': 0.0, '6/5': 0.0,
+            '7/6': 0.0, '8/7': 0.0, '8/5': 0.0, '5/3': 0.0,
+            '7/5': 0.0, '7/4': 0.0, '10/7': 0.0, '12/7': 0.0,
+        },
+        'attack_weight': 1.0, 'sounding_weight': 1.0,
+        'tolerance_cents': 12.0, 'fusion_discount': 0.65,
+        'intervening_voice_discount': 0.35,
+        'compound_decay_per_octave': 0.65,
+        'presence_scale': 1.0,
+    },
     'worst_subset_cse_weights': {
         'triad': {'full': 1.0, 'worst_dyad': 1.0},
         'tetrad': {'full': 1.0, 'worst_dyad': 1.0, 'worst_triad': 1.0},
@@ -35,6 +52,12 @@ DEFAULTS = {
         'register_weights': {'counter': 0.020, 'inner2': 0.022, 'inner': 0.024, 'bass': 0.020},
     },
     'sounding_octave_excess_cost': 1.0,
+    # Each direct 1:2:3 or 2:3:4 three-voice subset counts as one additional
+    # (virtual) octave for the excess calculation.  This shared count applies
+    # to three-, four-, and five-note sounding and attack sonorities.
+    # In five voices, additionally penalize a sonority when any four voices
+    # are a transposed subset of harmonics 1,2,3,4,6,8,12,16.
+    'sounding_octave_fifth_subset_cost': 0.0,
     # Five voices may use more exact-octave-family reinforcement before the
     # anti-collapse penalty starts. Other texture sizes retain the old limit.
     'sounding_octave_family_pair_allowance': {'2': 1, '3': 1, '4': 1, '5': 3},
@@ -59,18 +82,6 @@ DEFAULTS = {
 
 def resolve_annealing(supplied=None):
     supplied=copy.deepcopy({} if supplied is None else supplied)
-    # Accept old quadratic style rows and promote them to the quartic schema.
-    # Obsolete percentile penalty weights are ignored deliberately.
-    rows=supplied.get('cse_loss_polynomials',{})
-    for name,row in rows.items():
-        if isinstance(row,dict) and set(row)=={'a','b','c'}:
-            rows[name]={'a4':0.0,'a3':0.0,
-                        'a2':row['a'],'a1':row['b'],'a0':row['c']}
-    attack=supplied.get('attack')
-    if isinstance(attack,dict):
-        attack.pop('percentile_excess_weight',None)
-        attack.pop('percentile_excess_squared_weight',None)
-
     def merge(default, raw, path):
         if isinstance(default, dict):
             if not isinstance(raw, dict) or set(raw)-set(default):
@@ -90,8 +101,12 @@ def resolve_annealing(supplied=None):
             raise ValueError(f'{path} must be finite and nonnegative')
         return raw
     result=merge(DEFAULTS,supplied,'annealing')
-    if any(v>1 for v in result['subset_correction'].values()):
-        raise ValueError('subset correction must be in [0,1]')
+    if result['prime_salience']['tolerance_cents'] <= 0:
+        raise ValueError('prime_salience.tolerance_cents must be positive')
+    if result['prime_salience']['fusion_discount'] > 1:
+        raise ValueError('prime_salience.fusion_discount must be in [0,1]')
+    if result['prime_salience']['compound_decay_per_octave'] > 1:
+        raise ValueError('prime_salience.compound_decay_per_octave must be in [0,1]')
     for name,weights in result['worst_subset_cse_weights'].items():
         if sum(float(v) for v in weights.values()) <= 0:
             raise ValueError(f'annealing.worst_subset_cse_weights.{name} must have positive total weight')

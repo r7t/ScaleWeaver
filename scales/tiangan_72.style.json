@@ -50,10 +50,6 @@
         "worst_tetrad": 1.0
       }
     },
-    "subset_correction": {
-      "triad": 0.3333333333333333,
-      "tetrad": 0.3333333333333333
-    },
     "objective_weights": {
       "attack": 1.5,
       "sounding": 1.5,

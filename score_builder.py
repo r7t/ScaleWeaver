@@ -1,10 +1,8 @@
-"""ScaleWeaver score builder: melodic/rhythmic search and four-line counterpoint.
+"""ScaleWeaver score builder: melodic search and multi-voice counterpoint.
 
 CSE lookup and CSE-derived scoring live in ``adaptive_cse_runtime.py``.
 The Lead keeps n-grams, contour, motif recall and hard jump rules; bar-sequence
 and chord-arpeggio devices were intentionally removed in this compact revision.
-After the first pass, fixed-rhythm iterative regeneration repeatedly resamples
-all four pitch lines against the other voices' realised vertical context.
 """
 from __future__ import annotations
 import math
@@ -33,23 +31,6 @@ PRIME_13_REWARD = 0.0
 PRIME_17_REWARD = 0.0
 PRIME_REWARD_DEFAULTS = {2:0.0,3:0.0,5:0.0,7:0.0,11:0.0,13:0.0,17:0.0}
 
-# ---------------------------------------------------------------------------
-# Iterative fixed-rhythm pitch regeneration.
-#
-# Pass 0 creates the rhythm/timing skeleton exactly once.  Every later pass
-# keeps every start/duration unchanged and regenerates pitches only.
-#
-# A full iteration is a Gauss-Seidel-style sweep:
-#     Lead -> Counter -> Bass -> Inner
-# Earlier voices in the same sweep are immediately visible to later voices;
-# not-yet-regenerated voices remain available from the preceding iteration.
-# Thus every regenerated voice always sees the other three sounding lines.
-# ---------------------------------------------------------------------------
-PITCH_REGEN_ITERATIONS = 0
-PITCH_REGEN_MAX_RETRIES = 4
-PITCH_REGEN_LEAD_ACTUAL_CSE_WEIGHT = 1.0
-PITCH_REGEN_GUIDE_JITTER_DEGREES = 1
-
 def _active_prime_rewards():
     return {
         2: float(PRIME_2_REWARD), 3: float(PRIME_3_REWARD),
@@ -69,15 +50,6 @@ from harmony_rhythm import (
     rhythm_palette_metadata, validate_rhythm_bar,
 )
 
-absolute_cse_entry = cse_rt.absolute_cse_entry
-absolute_vertical_cse_interval = cse_rt.absolute_vertical_cse_interval
-attack_aware_vertical_cse_interval = cse_rt.attack_aware_vertical_cse_interval
-lead_chord_field_cse = cse_rt.lead_chord_field_cse
-four_part_relative_purity_summary = cse_rt.four_part_relative_purity_summary
-chord_cse_score = cse_rt.chord_cse_score
-vertical_cse_score = cse_rt.vertical_cse_score
-COUNTERPOINT_FOUR_PART_RAW_CSE_WEIGHT = cse_rt.COUNTERPOINT_FOUR_PART_RAW_CSE_WEIGHT
-COUNTERPOINT_RELATIVE_PURITY_WEIGHT = cse_rt.COUNTERPOINT_RELATIVE_PURITY_WEIGHT
 COUNTERPOINT_EFFECTIVE_RANGES = cse_rt.COUNTERPOINT_EFFECTIVE_RANGES
 
 LEAD_SECTION_BASE_CENTRES = {}
@@ -106,7 +78,6 @@ def configure_scale(spec):
     global LEAD_PHRASE_SHAPE_WEIGHTS, LEAD_BAR_SHAPE_WEIGHTS
     global LEAD_PHRASE_AMPLITUDES, LEAD_BAR_AMPLITUDES, LEAD_CENTRE_JITTER_DEGREES
     global LEAD_NORMAL_FLOW_MAX, LEAD_MEDIUM_LEAP_MAX
-    global COUNTERPOINT_FOUR_PART_RAW_CSE_WEIGHT, COUNTERPOINT_RELATIVE_PURITY_WEIGHT
     global LEAD_STRONG_RECOVERY_THRESHOLD, LEAD_PREFERRED_MAX_LEAP, LEAD_SIXTEENTH_FLOW_BONUS
     global LEAD_LEAP_TARGET_RATE, LEAD_LEAP_MIN_DEGREES, LEAD_LEAP_BALANCE_GAIN
     global LEAD_LARGE_LEAP_TARGET_RATE, LEAD_LARGE_LEAP_MIN_DEGREES
@@ -158,8 +129,6 @@ def configure_scale(spec):
                 LEAD_LEAP_BALANCE_PRIOR,LEAD_STRUCTURAL_LEAP_MULTIPLIER,
                 LEAD_SHORT_NOTE_LEAP_MULTIPLIER))):
         raise ValueError('lead_motion leap-balance parameters are invalid')
-    COUNTERPOINT_FOUR_PART_RAW_CSE_WEIGHT=cse_rt.COUNTERPOINT_FOUR_PART_RAW_CSE_WEIGHT
-    COUNTERPOINT_RELATIVE_PURITY_WEIGHT=cse_rt.COUNTERPOINT_RELATIVE_PURITY_WEIGHT
     # One normalized target for the entire scale. Unlisted pitches have zero
     # soft target; an empty map disables feedback. No extra core or base bonus.
     LEAD_PC_TARGETS = spec.resolved_lead_pc_targets()
@@ -517,13 +486,6 @@ def _lead_pc_frequency_cost(recent, pc, pc_counts=None):
     return (-LEAD_PC_TARGET_GAIN * max(-.08, min(.08, deficit))
             -LEAD_PC_COUNT_GAIN * max(-.55, min(.55, count_deficit / math.sqrt(n + prior))))
 
-def pitch_class_prior_metadata():
-    return {'enabled': bool(LEAD_PC_TARGETS),
-            'source': 'style.lead_pc_target_distribution',
-            'pc_targets': {str(pc): target for pc,target in LEAD_PC_TARGETS.items()},
-            'prior_notes': LEAD_PC_TARGET_PRIOR,
-            'frequency_gain': LEAD_PC_TARGET_GAIN, 'count_gain': LEAD_PC_COUNT_GAIN,
-            'principle': 'Normalized full-scale soft feedback; unlisted pitches have zero target, not a hard ban; no extra core/group or static pitch bonus.'}
 
 @lru_cache(maxsize=128)
 def _lead_interval_cost(ad):
@@ -613,6 +575,28 @@ def _lead_contour(kind, n, centre, amplitude):
         out.append(int(round(centre + amplitude*y)))
     return tuple(out)
 
+
+def _lead_phrase_contour(kind, n, centre, amplitude):
+    """Cadence-aware macro contour for one complete phrase.
+
+    A short rising phrase otherwise spends every pre-cadential bar climbing
+    and leaves all of the descent to the final tonic.  For phrases of at most
+    six bars, move the peak to the third-last bar and use the last two bars as
+    a gradual release.  Longer and non-rising contours retain their original
+    shape.
+    """
+    if kind != 'rise' or n > 6 or n < 4:
+        return _lead_contour(kind, n, centre, amplitude)
+    peak = n - 3
+    out = []
+    for i in range(n):
+        if i <= peak:
+            y = -1.0 + 2.0 * i / peak
+        else:
+            y = 1.0 - 1.4 * (i - peak) / (n - 1 - peak)
+        out.append(int(round(centre + amplitude * y)))
+    return tuple(out)
+
 def _lead_metric_class(beat_in_bar, beats_per_bar):
     if beat_in_bar is None:
         return 'offbeat'
@@ -661,17 +645,12 @@ def lead_candidate_cost_components(prev, prev2, chord, strong, recent, cand,
                                     guide_degree, direction=0, boundary=False,
                                     beat_in_bar=None, duration=1.0,
                                     beats_per_bar=4):
-    """Deterministic Lead scoring shared by candidate sampling and beam ranking.
-
-    The returned values are *unweighted primitive costs*.  Callers decide how
-    to aggregate them across a unit, but cannot accidentally use a different
-    definition of interval, n-gram, landing, or background cost.
-    """
+    """Return deterministic Lead costs for sampling and beam search."""
     cand = int(cand)
     d, pc = degree(cand), cand % OCT
-    centre = int(guide_degree)
     prev_d = degree(prev) if prev is not None else None
     old = degree(prev) - degree(prev2) if prev is not None and prev2 is not None else 0
+    centre = int(guide_degree)
     if prev is not None:
         dd = d - prev_d
         ad = abs(dd)
@@ -688,46 +667,38 @@ def lead_candidate_cost_components(prev, prev2, chord, strong, recent, cand,
         window = recent[-int(LEAD_REGISTER_CENTROID_WINDOW):]
         recent_mean_step = sum(float(p) for p in window) / len(window)
 
-    out = {
-        "guide": LEAD_GUIDE_WEIGHT * abs(d - centre),
-        "register": _lead_register_cost(cand, recent, recent_mean_step),
-        "interval": 0.0,
-        "leap_recovery": 0.0,
-        "landing": _lead_landing_cost(pc, chord, beat_in_bar, duration, beats_per_bar),
-        "sixteenth_flow": 0.0,
-        "direction": 0.0,
-        "ngram": _lead_ngram_prior_cost(recent, cand),
-        "pc_frequency": _lead_pc_frequency_cost(recent, pc, pc_counts),
-        "motion_diversity": _lead_motion_diversity_cost(recent, cand, strong, duration),
-        "background": cse_rt.lead_chord_field_cost(chord, cand, strong),
-        "boundary": 0.0,
-    }
+    cost = LEAD_GUIDE_WEIGHT * abs(d - centre)
+    cost += _lead_register_cost(cand, recent, recent_mean_step)
     if prev is not None:
-        out["interval"] = _lead_interval_cost(ad)
+        cost += _lead_interval_cost(ad)
         if ad > LEAD_PREFERRED_MAX_LEAP:
-            out["interval"] += .42 * (ad - LEAD_PREFERRED_MAX_LEAP)
+            cost += .42 * (ad - LEAD_PREFERRED_MAX_LEAP)
         old_ad = abs(old)
         if LEAD_NORMAL_FLOW_MAX < old_ad <= LEAD_MEDIUM_LEAP_MAX:
             if dd * old < 0 and 1 <= ad <= LEAD_NORMAL_FLOW_MAX:
-                out["leap_recovery"] -= LEAD_MEDIUM_RECOVERY_BONUS
+                cost -= LEAD_MEDIUM_RECOVERY_BONUS
             elif dd * old > 0 and ad > LEAD_NORMAL_FLOW_MAX:
-                out["leap_recovery"] += .12
+                cost += .12
         elif old_ad > LEAD_STRONG_RECOVERY_THRESHOLD:
             if dd * old < 0 and 1 <= ad <= LEAD_NORMAL_FLOW_MAX:
-                out["leap_recovery"] -= LEAD_LEAP_RECOVERY_BONUS
+                cost -= LEAD_LEAP_RECOVERY_BONUS
             elif dd * old > 0 and ad >= LEAD_NORMAL_FLOW_MAX:
-                out["leap_recovery"] += .40
-        if float(duration) <= .250001:
-            if ad in LEAD_SIXTEENTH_FLOW_BONUS:
-                out["sixteenth_flow"] -= LEAD_SIXTEENTH_FLOW_BONUS[ad]
-            elif ad > LEAD_NORMAL_FLOW_MAX:
-                out["sixteenth_flow"] += LEAD_SIXTEENTH_LARGE_LEAP_COST * (ad - LEAD_NORMAL_FLOW_MAX)
-        if direction and dd:
-            out["direction"] = -.10 if dd * direction > 0 else .12
+                cost += .40
+    cost += _lead_landing_cost(pc, chord, beat_in_bar, duration, beats_per_bar)
+    if prev is not None and float(duration) <= .250001:
+        if ad in LEAD_SIXTEENTH_FLOW_BONUS:
+            cost -= LEAD_SIXTEENTH_FLOW_BONUS[ad]
+        elif ad > LEAD_NORMAL_FLOW_MAX:
+            cost += LEAD_SIXTEENTH_LARGE_LEAP_COST * (ad - LEAD_NORMAL_FLOW_MAX)
+    if prev is not None and direction and dd:
+        cost += -.10 if dd * direction > 0 else .12
+    cost += _lead_ngram_prior_cost(recent, cand)
+    cost += _lead_pc_frequency_cost(recent, pc, pc_counts)
+    cost += _lead_motion_diversity_cost(recent, cand, strong, duration)
+    cost += cse_rt.lead_chord_field_cost(chord, cand, strong)
     if boundary and pc == chord.foot % OCT:
-        out["boundary"] = -LEAD_BOUNDARY_FOOT_REWARD
-    out["total"] = sum(out.values())
-    return out
+        cost -= LEAD_BOUNDARY_FOOT_REWARD
+    return {'total':cost}
 
 
 def choose_lead_pitch(prev, prev2, chord, strong, recent, rng, guide_degree,
@@ -739,11 +710,11 @@ def choose_lead_pitch(prev, prev2, chord, strong, recent, rng, guide_degree,
             prev, prev2, chord, strong, recent, cand, guide_degree, direction,
             boundary, beat_in_bar, duration, beats_per_bar)
         if components is not None:
-            scored.append((components["total"] + rng.uniform(0.0, .055), cand))
+            scored.append((components['total'] + rng.uniform(0.0, .055), cand))
     cand = _sample_predictable(scored, rng)
     if cand is not None:
         return cand
-    return nearest_pc('lead', chord.foot % OCT, degree_pitch(int(guide_degree)), prev)
+    return nearest_pc('lead', chord.foot % OCT, degree_pitch(centre), prev)
 
 def user_motif_steps(motif_degrees):
     return [degree_pitch(int(x) - MOTIF_DEGREE_ORIGIN) for x in motif_degrees] if motif_degrees else []
@@ -758,263 +729,6 @@ def _fit_motif_pitch(raw, prev, guide_degree):
     return min(candidates, key=lambda p: abs(degree(p) - int(guide_degree)) +
                (.25 * abs(degree(p) - degree(prev)) if prev is not None else 0))
 
-def _phrase_direction(guides, i):
-    if i + 1 < len(guides):
-        x = guides[i + 1] - guides[i]
-    elif i:
-        x = guides[i] - guides[i-1]
-    else:
-        x = 0
-    return 1 if x > 0 else -1 if x < 0 else 0
-
-def _nearest_degree_pitch(target_degree, prev=None):
-    candidates = list(POOLS['lead'])
-    if prev is not None:
-        legal = [p for p in candidates if lead_jump_ok(prev, p)]
-        if legal:
-            candidates = legal
-    return min(candidates, key=lambda p: abs(degree(p) - int(target_degree)))
-
-def _harmony_bar_similar(h1, h2, bpb):
-    """True when two full bar-level harmony paths are motif-compatible.
-
-    All change-points from both bars are merged.  In every resulting time slice
-    the two active chords must share at least two ScaleWeaver pitch classes.  This
-    is stricter than comparing only the first chord and therefore also handles
-    multi-chord bars safely.
-    """
-    points = {0.0, float(bpb)}
-    for h in (h1, h2):
-        for seg in h.get('chord_segments', ()):
-            points.add(round(float(seg['offset']), 6))
-            points.add(round(float(seg['offset']) + float(seg['duration']), 6))
-    points = sorted(x for x in points if -1e-9 <= x <= float(bpb) + 1e-9)
-    for a, b in zip(points, points[1:]):
-        if b - a <= 1e-8:
-            continue
-        mid = (a + b) * .5
-        sa, sb = harmony_segment_at(h1, mid), harmony_segment_at(h2, mid)
-        ca, cb = CHORDS[sa['chord_id']], CHORDS[sb['chord_id']]
-        if len(set(ca.pcs) & set(cb.pcs)) < 2:
-            return False
-    return True
-
-def _section_motif_indices(phrase_len, forbidden, rng):
-    """Pick two memorable bars from different halves when possible."""
-    usable = [i for i in range(max(0, phrase_len - 1)) if i not in forbidden]
-    if not usable:
-        return []
-    left = [i for i in usable if i < phrase_len // 2]
-    right = [i for i in usable if i >= phrase_len // 2]
-    chosen = []
-    if left:
-        chosen.append(rng.choice(left))
-    if right and len(chosen) < LEAD_SECTION_MOTIF_COUNT:
-        chosen.append(rng.choice(right))
-    rest = [i for i in usable if i not in chosen]
-    while rest and len(chosen) < LEAD_SECTION_MOTIF_COUNT:
-        x = rng.choice(rest); chosen.append(x); rest.remove(x)
-    return sorted(chosen)
-
-def _replay_bar_template(template, bar, plan, rng, bpb, prev, prev2, recent,
-                         tag, section_repeat=False, vary_weak=False, source_bar=None):
-    out, copied = [], []
-    for item in template:
-        off, dur = float(item['offset']), float(item['dur'])
-        seg = harmony_segment_at(plan[bar], off)
-        chord = CHORDS[seg['chord_id']]
-        strong = is_strong_beat(off, bpb)
-        source_pitch = int(item['step'])
-        cand = fit_lead_pitch_to_jump(source_pitch, prev, source_pitch, True)
-        if vary_weak and not strong and rng.random() < LEAD_SECTION_WEAK_VARIATION_RATE:
-            trial = _nearest_degree_pitch(degree(source_pitch) + rng.choice((-1, 1)), prev)
-            if trial is not None and lead_jump_ok(prev, trial):
-                cand = trial
-        if strong and lead_chord_field_cse(chord, cand) > 2.76:
-            alt = choose_lead_pitch(prev, prev2, chord, True, recent, rng,
-                                    degree(source_pitch), 0, False, off, dur, bpb)
-            if alt is not None:
-                cand = alt
-        cand = fit_lead_pitch_to_jump(cand, prev, source_pitch, True)
-        out.append(event(bar*bpb + off, dur, cand, 'lead', rng, seg,
-                         structural=strong, motif=tag, section_repeat=bool(section_repeat),
-                         section_variation=tag, ornamental_repeat=(prev is not None and cand == prev),
-                         motif_source_bar=source_bar))
-        copied.append({'offset': round(off, 6), 'dur': dur, 'step': int(cand)})
-        prev2, prev = prev, cand
-        recent.append(cand)
-    return out, copied, prev, prev2
-
-def _plan_lead_anchor_bars(plan, bars, bpb, rng):
-    """Plan one ritornello-like one-bar anchor for the whole score.
-
-    The source is chosen from the first phrase, then only later non-cadence bars
-    with a harmony-compatible full-bar trajectory are eligible.  This creates
-    recognition at bar scale without forcing an AABA whole-section copy.
-    """
-    if bars < 16 or rng.random() >= LEAD_ANCHOR_BAR_RATE:
-        return None
-    source_candidates = [i for i in range(min(7, bars))
-                         if plan[i].get('chords_in_bar', 1) <= 2]
-    rng.shuffle(source_candidates)
-    for source in source_candidates:
-        later = [j for j in range(max(8, source + 2), bars)
-                 if j % 8 != 7 and _harmony_bar_similar(plan[source], plan[j], bpb)]
-        if len(later) < 2:
-            continue
-        desired = rng.choices(LEAD_ANCHOR_APPEARANCES,
-                              weights=LEAD_ANCHOR_APPEARANCE_WEIGHTS, k=1)[0]
-        target_count = min(len(later), max(2, desired - 1))
-        chosen = []
-        for j in later:
-            if not chosen or j - chosen[-1] >= 4:
-                chosen.append(j)
-            if len(chosen) >= target_count:
-                break
-        if len(chosen) < target_count:
-            rest = [j for j in later if j not in chosen]
-            rng.shuffle(rest)
-            chosen += rest[:target_count-len(chosen)]
-        chosen = tuple(sorted(chosen[:target_count]))
-        return {'source': int(source), 'targets': chosen,
-                'appearances': 1 + len(chosen)}
-    return None
-
-def generate_lead(bars, plan, rng, motif_degrees=None, beats_per_bar=4,
-                  rhythm_palette=None, allow_sixteenth=False):
-    palette = rhythm_palette or make_rhythm_palette(rng, beats_per_bar)
-    motif_queue = user_motif_steps(motif_degrees)
-    events, recent, section_memory = [], [], {}
-    prev = prev2 = None
-    anchor_plan = _plan_lead_anchor_bars(plan, bars, beats_per_bar, rng)
-    anchor_template = None
-    phrase_start = 0
-    while phrase_start < bars:
-        phrase_len = min(8, bars - phrase_start)
-        section = plan[phrase_start].get('section', 'A')
-        memory = section_memory.get(section)
-        anchor_source = anchor_plan['source'] if anchor_plan else None
-        anchor_targets = set(anchor_plan['targets']) if anchor_plan else set()
-        anchor_local = {b - phrase_start for b in ({anchor_source} | anchor_targets)
-                        if b is not None and phrase_start <= b < phrase_start + phrase_len}
-        if memory:
-            base_centre = memory['base_centre'] + _lead_centre_jitter(rng)
-            macro_kind = (memory['macro_kind'] if rng.random() < LEAD_SECTION_MACRO_REUSE_RATE
-                          else rng.choices(LEAD_SHAPE_KINDS,
-                                           LEAD_PHRASE_SHAPE_WEIGHTS, k=1)[0])
-        else:
-            base_centre = rng.choice(LEAD_SECTION_BASE_CENTRES.get(section, LEAD_SECTION_BASE_CENTRES['A']))
-            macro_kind = rng.choices(LEAD_SHAPE_KINDS,
-                                     LEAD_PHRASE_SHAPE_WEIGHTS, k=1)[0]
-        bar_centres = _lead_contour(
-            macro_kind, phrase_len, base_centre, rng.choice(LEAD_PHRASE_AMPLITUDES))
-        rhythms = [_choose_melodic_rhythm(
-            phrase_start + j, rng, beats_per_bar, palette, cadence=(j == phrase_len - 1),
-            allow_sixteenth=allow_sixteenth, fancy_rate=LEAD_FANCY_RHYTHM_RATE,
-            syncopation_multiplier=LEAD_SYNCOPATED_RHYTHM_MULTIPLIER)
-            for j in range(phrase_len)]
-        recall_indices = set()
-        if memory:
-            eligible = [idx for idx, info in memory['motifs'].items()
-                        if idx < phrase_len and _harmony_bar_similar(
-                            plan[info['source_bar']], plan[phrase_start + idx], beats_per_bar)]
-            if eligible:
-                if rng.random() < LEAD_SECTION_PRIMARY_REUSE_RATE:
-                    recall_indices.add(eligible[0])
-                recall_indices.update(idx for idx in eligible[1:]
-                                      if rng.random() < LEAD_SECTION_SECONDARY_REUSE_RATE)
-                if not recall_indices:
-                    recall_indices.add(eligible[0])
-                recall_indices.difference_update(anchor_local)
-                for idx in recall_indices:
-                    rhythms[idx] = tuple(x['dur'] for x in memory['motifs'][idx]['template'])
-        repeat_pair = None
-        if phrase_len >= 4 and rng.random() < LEAD_MOTIF_REPEAT_RATE:
-            pairs = []
-            for source in range(phrase_len - 2):
-                if source in recall_indices or source in anchor_local:
-                    continue
-                for target in range(source + 2, phrase_len):
-                    if target in recall_indices or target in anchor_local:
-                        continue
-                    if _harmony_bar_similar(plan[phrase_start + source],
-                                             plan[phrase_start + target], beats_per_bar):
-                        pairs.append((source, target))
-            if pairs:
-                nonfinal = [x for x in pairs if x[1] != phrase_len - 1]
-                repeat_pair = rng.choice(nonfinal or pairs)
-                rhythms[repeat_pair[1]] = rhythms[repeat_pair[0]]
-        bar_templates = {}
-        for j in range(phrase_len):
-            bar = phrase_start + j
-            if anchor_plan and bar in anchor_targets and anchor_template:
-                replayed, template, prev, prev2 = _replay_bar_template(
-                    anchor_template, bar, plan, rng, beats_per_bar, prev, prev2, recent,
-                    'ritornello_anchor_repeat', vary_weak=rng.random() < LEAD_ANCHOR_WEAK_VARIATION_RATE,
-                    source_bar=anchor_source)
-                for e in replayed:
-                    e['anchor_bar_group'] = f'anchor:{anchor_source}'
-                    e['anchor_bar_position'] = 'repeat'
-                events.extend(replayed); bar_templates[j] = template
-                continue
-            if memory and j in recall_indices:
-                info = memory['motifs'][j]
-                replayed, template, prev, prev2 = _replay_bar_template(
-                    info['template'], bar, plan, rng, beats_per_bar, prev, prev2, recent,
-                    f'section_{section}_family_repeat', True, True, info['source_bar'])
-                events.extend(replayed); bar_templates[j] = template
-                continue
-            if repeat_pair is not None and j == repeat_pair[1]:
-                replayed, template, prev, prev2 = _replay_bar_template(
-                    bar_templates.get(repeat_pair[0], ()), bar, plan, rng, beats_per_bar,
-                    prev, prev2, recent, 'single_motif_repeat', source_bar=phrase_start + repeat_pair[0])
-                events.extend(replayed); bar_templates[j] = template
-                continue
-            rhythm = rhythms[j]
-            local_kind = rng.choices(LEAD_SHAPE_KINDS,
-                                     LEAD_BAR_SHAPE_WEIGHTS, k=1)[0]
-            guides = _lead_contour(
-                local_kind, len(rhythm), bar_centres[j], rng.choice(LEAD_BAR_AMPLITUDES))
-            off, template = 0.0, []
-            for i, dur in enumerate(rhythm):
-                seg = harmony_segment_at(plan[bar], off)
-                chord = CHORDS[seg['chord_id']]
-                strong = is_strong_beat(off, beats_per_bar)
-                boundary = (j == 0 and i == 0) or (j == phrase_len - 1 and i == len(rhythm) - 1)
-                guide = guides[i]
-                if motif_queue:
-                    cand = _fit_motif_pitch(motif_queue.pop(0), prev, guide)
-                    tag = 'user'
-                else:
-                    cand = choose_lead_pitch(prev, prev2, chord, strong, recent, rng, guide,
-                                             _phrase_direction(guides, i), boundary,
-                                             off, dur, beats_per_bar)
-                    tag = f'phrase_{macro_kind}_{local_kind}'
-                if cand is None:
-                    cand = nearest_pc('lead', chord.foot % OCT, degree_pitch(guide), prev)
-                cand = fit_lead_pitch_to_jump(cand, prev, degree_pitch(guide), True)
-                events.append(event(bar*beats_per_bar + off, dur, cand, 'lead', rng, seg,
-                                    structural=strong, motif=tag, section_repeat=False,
-                                    section_variation='fresh_phrase', ornamental_repeat=False))
-                template.append({'offset': round(off, 6), 'dur': float(dur), 'step': int(cand)})
-                prev2, prev = prev, cand
-                recent.append(cand)
-                off = round(off + float(dur), 6)
-            bar_templates[j] = template
-            if anchor_plan and bar == anchor_source:
-                anchor_template = [dict(x) for x in template]
-                for e in events[-len(template):]:
-                    e['anchor_bar_group'] = f'anchor:{anchor_source}'
-                    e['anchor_bar_position'] = 'source'
-        if memory is None:
-            motif_indices = _section_motif_indices(phrase_len, set(repeat_pair or ()) | set(anchor_local), rng)
-            section_memory[section] = {
-                'base_centre': base_centre, 'macro_kind': macro_kind,
-                'motifs': {idx: {'source_bar': phrase_start + idx,
-                                 'template': [dict(x) for x in bar_templates[idx]]}
-                           for idx in motif_indices if idx in bar_templates}}
-        phrase_start += phrase_len
-    return events
 
 def smooth_allowed(n):
     for q in RATIO_SMOOTH_PRIMES:
@@ -1266,16 +980,19 @@ def _choose_counterpoint_pitch(voice, prev, prev2, recent, chord, existing,
     return p
 
 
-def _line_phrase_centres(voice, bars, rng):
+def _line_phrase_centres(voice, bars, rng, plan=None):
     key = 'counter' if voice.startswith('counter') else voice
     base = COUNTERPOINT_ROLE_CENTRE_DEGREE[key]
     out = []
-    for phrase_start in range(0, bars, 8):
-        n = min(8, bars - phrase_start)
+    phrase_start = 0
+    while phrase_start < bars:
+        phrase_bars = int(plan[phrase_start].get('phrase_bars', 8)) if plan else 8
+        n = min(phrase_bars, bars - phrase_start)
         kind = rng.choices(('arch', 'rise', 'fall', 'valley'), (.42, .22, .24, .12), k=1)[0]
         centre = base + rng.choice((-2, -1, 0, 0, 1, 2))
         amp = rng.choice((2, 3, 3, 4))
-        out.extend(_lead_contour(kind, n, centre, amp))
+        out.extend(_lead_phrase_contour(kind, n, centre, amp))
+        phrase_start += n
     return out
 
 def _choose_sparse_bass_rhythm(rng, bpb, cadence=False):
@@ -1303,13 +1020,14 @@ def _generate_counterpoint_line(voice, bars, plan, existing, rng, bpb,
     events, recent = [], []
     prev = prev2 = None
     prev_vertical_distance = None
-    centres = _line_phrase_centres(voice, bars, rng)
+    centres = _line_phrase_centres(voice, bars, rng, plan)
     fancy_key = 'counter' if voice.startswith('counter') else voice
     fancy_rate = COUNTERPOINT_FANCY_RHYTHM_RATE.get(
         fancy_key, COUNTERPOINT_FANCY_RHYTHM_RATE['inner'])
 
     for bar, h in enumerate(plan[:bars]):
-        cadence = (bar % 8 == 7) or (bar == bars - 1)
+        phrase_bars = int(h.get('phrase_bars', 8))
+        cadence = ((bar + 1) % phrase_bars == 0) or (bar == bars - 1)
         if voice == 'bass':
             ds = _choose_sparse_bass_rhythm(rng, bpb, cadence=cadence)
         else:
@@ -1339,370 +1057,16 @@ def _generate_counterpoint_line(voice, bars, plan, existing, rng, bpb,
             off = round(off + float(dur), 6)
     return events
 
-def generate_counter_voice(bars, plan, lead, rng, bpb, rhythm_palette, mode=None):
-    """Generate the sole independent Counter line.
-
-    Fixed Lead-minus-3 / Lead-minus-7 score-wide parallel modes have been
-    removed.  Ordinary contrary-motion and repeated-vertical-distance penalties
-    inside _choose_counterpoint_pitch remain as contrapuntal preferences.
-    """
-    line = _generate_counterpoint_line(
-        'counter', bars, plan, {'lead': lead}, rng, bpb, rhythm_palette, 'lead')
-    return 'counter', line
-
-def generate_inner(bars, plan, existing, rng, bpb, rhythm_palette):
-    secondary = 'counter' if existing.get('counter') else 'lead'
-    return _generate_counterpoint_line('inner', bars, plan, existing, rng, bpb,
-                                       rhythm_palette, secondary)
-
-def generate_bass(bars, plan, existing, rng, bpb, rhythm_palette):
-    reference = 'inner' if existing.get('inner') else ('counter' if existing.get('counter') else 'lead')
-    return _generate_counterpoint_line('bass', bars, plan, existing, rng, bpb,
-                                       rhythm_palette, reference)
-
-
-def _clone_event_with_pitch(template, pitch):
-    """Copy an event while changing pitch and absolutely nothing rhythmic.
-
-    start_beat, duration_beats, phase, velocity, motif/rhythm metadata and all
-    other structural fields remain byte-for-byte equivalent Python values.
-    """
-    out = dict(template)
-    p = int(pitch)
-    out['step'] = p
-    out['name'] = pitch_name(p)
-    out['freq'] = freq(p)
-    return out
-
-
-def _iterative_lead_pitch(prev, prev2, recent, chord, strong, existing,
-                          start, dur, rng, guide_degree, direction=0,
-                          boundary=False, beat_in_bar=None, beats_per_bar=4):
-    """Lead candidate search used only by fixed-rhythm regeneration.
-
-    This is deliberately the Lead grammar rather than the generic accompaniment
-    grammar: distance prior, recovery, n-grams, tonic-core frequency control,
-    metrical landing and virtual chord field are all retained.  The new part is
-    hard legality + attack-aware realised CSE against the other three voices.
-    """
-    scored = []
-    prev_d = degree(prev) if prev is not None else None
-    old = degree(prev) - degree(prev2) if prev is not None and prev2 is not None else 0
-    centre = int(guide_degree)
-
-    for cand in POOLS['lead']:
-        d, pc = degree(cand), cand % OCT
-
-        vc = _counterpoint_vertical_cost('lead', cand, existing, start, dur)
-        if math.isinf(vc):
-            continue
-
-        if prev is not None:
-            dd = d - prev_d
-            ad = abs(dd)
-            if ad > LEAD_MAX_JUMP_DEGREES:
-                continue
-        else:
-            dd = ad = 0
-
-        cost = vc + LEAD_GUIDE_WEIGHT * abs(d - centre)
-        cost += _lead_register_cost(cand, recent)
-        cost += _special_distance_soft_cost(cand, existing, start, dur)
-
-        if prev is not None:
-            cost += _lead_interval_cost(ad)
-            if ad > LEAD_PREFERRED_MAX_LEAP:
-                cost += .42 * (ad - LEAD_PREFERRED_MAX_LEAP)
-            old_ad = abs(old)
-            if LEAD_NORMAL_FLOW_MAX < old_ad <= LEAD_MEDIUM_LEAP_MAX:
-                if dd * old < 0 and 1 <= ad <= LEAD_NORMAL_FLOW_MAX:
-                    cost -= LEAD_MEDIUM_RECOVERY_BONUS
-                elif dd * old > 0 and ad > LEAD_NORMAL_FLOW_MAX:
-                    cost += .12
-            elif old_ad > LEAD_STRONG_RECOVERY_THRESHOLD:
-                if dd * old < 0 and 1 <= ad <= LEAD_NORMAL_FLOW_MAX:
-                    cost -= LEAD_LEAP_RECOVERY_BONUS
-                elif dd * old > 0 and ad >= LEAD_NORMAL_FLOW_MAX:
-                    cost += .40
-
-        cost += _lead_landing_cost(
-            pc, chord, beat_in_bar, dur, beats_per_bar)
-
-        if prev is not None and float(dur) <= .250001:
-            if ad in LEAD_SIXTEENTH_FLOW_BONUS:
-                cost -= LEAD_SIXTEENTH_FLOW_BONUS[ad]
-            elif ad > LEAD_NORMAL_FLOW_MAX:
-                cost += LEAD_SIXTEENTH_LARGE_LEAP_COST * (ad - LEAD_NORMAL_FLOW_MAX)
-
-        if prev is not None and direction and dd:
-            cost += -.10 if dd * direction > 0 else .12
-
-        cost += _lead_ngram_prior_cost(recent, cand)
-        cost += _lead_pc_frequency_cost(recent, pc)
-        cost += _lead_motion_diversity_cost(recent, cand, strong, dur)
-        cost += cse_rt.lead_chord_field_cost(chord, cand, strong)
-
-        actual, coverage, _ = attack_aware_vertical_cse_interval(
-            cand, existing, start, dur)
-        if actual is not None and coverage > 0:
-            cost += (hr._CSE_STRENGTH
-                     * float(PITCH_REGEN_LEAD_ACTUAL_CSE_WEIGHT)
-                     * float(actual))
-
-        # Keep prime-colour rewards active for the regenerated Lead too when the
-        # runtime exposes the same attack-aware helper used by accompaniment.
-        prime_cost_fn = getattr(cse_rt, 'attack_aware_prime_reward_cost', None)
-        if prime_cost_fn is not None:
-            cost += prime_cost_fn(
-                cand, existing, start, dur,
-                prime_rewards=_active_prime_rewards())
-
-        if boundary and pc == chord.foot % OCT:
-            cost -= LEAD_BOUNDARY_FOOT_REWARD
-
-        cost += rng.uniform(0.0, .055)
-        attack_limit = cse_rt.simultaneous_attack_soft_limit(
-            cand, existing, start)
-        scored.append((cost, cand, attack_limit))
-
-    scored = cse_rt.apply_simultaneous_attack_soft_limits(scored)
-    cand = _sample_predictable(scored, rng)
-    if cand is None:
-        raise GenerationRejected(
-            f'no legal iterative Lead pitch at beat {start}')
-    return cand
-
-
-def _regenerate_lead_fixed_rhythm(template, previous_line, plan, existing,
-                                  rng, bpb):
-    """Regenerate every Lead pitch while preserving its complete timing skeleton."""
-    out, recent = [], []
-    prev = prev2 = None
-    n = len(template)
-
-    for i, base in enumerate(template):
-        start = float(base['start_beat'])
-        dur = float(base['duration_beats'])
-        bar = min(len(plan) - 1, int((start + 1e-9) // bpb))
-        off = start - bar * bpb
-        seg = harmony_segment_at(plan[bar], off)
-        chord = CHORDS[seg['chord_id']]
-        strong = is_strong_beat(off, bpb)
-
-        template_step = int(base['step'])
-        jitter = int(PITCH_REGEN_GUIDE_JITTER_DEGREES)
-        guide = degree(template_step) + (rng.randint(-jitter, jitter) if jitter > 0 else 0)
-
-        if i + 1 < len(template):
-            next_old = degree(int(template[i + 1]['step']))
-            this_old = degree(template_step)
-            direction = 1 if next_old > this_old else -1 if next_old < this_old else 0
-        else:
-            direction = 0
-
-        phrase_pos = bar % 8
-        boundary = (
-            (phrase_pos == 0 and abs(off) < 1e-9)
-            or (phrase_pos == 7 and abs((off + dur) - bpb) < 1e-9)
-            or i == 0 or i == n - 1
-        )
-
-        p = _iterative_lead_pitch(
-            prev, prev2, recent, chord, strong, existing,
-            start, dur, rng, guide, direction, boundary, off, bpb)
-
-        out.append(_clone_event_with_pitch(base, p))
-        recent.append(p)
-        prev2, prev = prev, p
-
-    return out
-
-
-def _regenerate_counterpoint_fixed_rhythm(voice, template, previous_line, plan,
-                                          existing, rng, bpb, reference_voice):
-    """Regenerate one accompaniment line on an immutable onset/duration skeleton."""
-    events, recent = [], []
-    prev = prev2 = None
-    prev_vertical_distance = None
-
-    for i, base in enumerate(template):
-        start = float(base['start_beat'])
-        dur = float(base['duration_beats'])
-        bar = min(len(plan) - 1, int((start + 1e-9) // bpb))
-        off = start - bar * bpb
-        seg = harmony_segment_at(plan[bar], off)
-        chord = CHORDS[seg['chord_id']]
-
-        template_step = int(base['step'])
-        jitter = int(PITCH_REGEN_GUIDE_JITTER_DEGREES)
-        guide = degree(template_step) + (rng.randint(-jitter, jitter) if jitter > 0 else 0)
-
-        p = _choose_counterpoint_pitch(
-            voice, prev, prev2, recent, chord, existing,
-            start, dur, rng, guide, reference_voice, prev_vertical_distance)
-
-        ref_step = _active_reference_step(
-            existing, reference_voice, start, dur)
-        if ref_step is not None:
-            prev_vertical_distance = abs(degree(ref_step) - degree(p))
-
-        events.append(_clone_event_with_pitch(base, p))
-        recent.append(p)
-        prev2, prev = prev, p
-
-    return events
-
-
-def _pitch_iteration_rng(seed, iteration, attempt, voice):
-    salts = {
-        'lead': 0x19A4C3D7,
-        'counter': 0x2B7E51A9,
-        'bass': 0x63D91F25,
-        'inner': 0x51C8A73B,
-    }
-    x = (int(seed) & 0xFFFFFFFFFFFFFFFF)
-    x ^= (int(iteration) + 1) * 0x9E3779B185EBCA87
-    x ^= (int(attempt) + 1) * 0xC2B2AE3D27D4EB4F
-    x ^= salts[voice]
-    return random.Random(x & 0xFFFFFFFFFFFFFFFF)
-
-
-def _fixed_rhythm_signature(voices):
-    return {
-        voice: tuple(
-            (float(e['start_beat']), float(e['duration_beats']))
-            for e in xs)
-        for voice, xs in voices.items()
-    }
-
-
-def _regenerate_all_pitches_iteratively(voices, plan, seed, bpb,
-                                        iterations=PITCH_REGEN_ITERATIONS):
-    """Run full fixed-rhythm pitch sweeps over all four voices.
-
-    The immutable templates are captured before the first iteration.  At every
-    sweep, Lead sees the preceding Counter/Bass/Inner; Counter then sees the new
-    Lead; Bass sees new Lead+Counter and the preceding Inner; Inner finally sees
-    all three newly regenerated voices.  On the next sweep every voice therefore
-    receives feedback from the complete preceding four-part result.
-    """
-    iterations = max(0, int(iterations))
-    if iterations == 0:
-        return voices, []
-
-    templates = {
-        voice: [dict(e) for e in xs]
-        for voice, xs in voices.items()
-    }
-    fixed_signature = _fixed_rhythm_signature(templates)
-    current = {
-        voice: [dict(e) for e in xs]
-        for voice, xs in voices.items()
-    }
-    history = []
-
-    for iteration in range(iterations):
-        previous = {
-            voice: [dict(e) for e in xs]
-            for voice, xs in current.items()
-        }
-
-        success = None
-        last_error = None
-        for attempt in range(max(1, int(PITCH_REGEN_MAX_RETRIES))):
-            trial = {
-                voice: [dict(e) for e in xs]
-                for voice, xs in previous.items()
-            }
-            try:
-                # 1) Lead: actual Counter/Bass/Inner CSE + Lead grammar.
-                lead_existing = {v: xs for v, xs in trial.items() if v != 'lead'}
-                trial['lead'] = _regenerate_lead_fixed_rhythm(
-                    templates['lead'], previous['lead'], plan, lead_existing,
-                    _pitch_iteration_rng(seed, iteration, attempt, 'lead'), bpb)
-
-                # 2) Independent Counter only.
-                counter_existing = {v: xs for v, xs in trial.items() if v != 'counter'}
-                trial['counter'] = _regenerate_counterpoint_fixed_rhythm(
-                    'counter', templates['counter'], previous['counter'], plan,
-                    counter_existing,
-                    _pitch_iteration_rng(seed, iteration, attempt, 'counter'),
-                    bpb, 'lead')
-
-                # 3) Bass.  Existing Inner from the preceding sweep is a real
-                # sounding constraint, so the old "leave a future Inner slot"
-                # lookahead is skipped automatically.
-                bass_existing = {v: xs for v, xs in trial.items() if v != 'bass'}
-                bass_reference = 'inner' if bass_existing.get('inner') else 'counter'
-                trial['bass'] = _regenerate_counterpoint_fixed_rhythm(
-                    'bass', templates['bass'], previous['bass'], plan,
-                    bass_existing,
-                    _pitch_iteration_rng(seed, iteration, attempt, 'bass'),
-                    bpb, bass_reference)
-
-                # 4) Inner sees the three newly regenerated lines.
-                inner_existing = {v: xs for v, xs in trial.items() if v != 'inner'}
-                trial['inner'] = _regenerate_counterpoint_fixed_rhythm(
-                    'inner', templates['inner'], previous['inner'], plan,
-                    inner_existing,
-                    _pitch_iteration_rng(seed, iteration, attempt, 'inner'),
-                    bpb, 'counter')
-
-                # Exact rhythm immutability check.
-                if _fixed_rhythm_signature(trial) != fixed_signature:
-                    raise RuntimeError('iterative pitch pass changed rhythm skeleton')
-
-                hard, seconds, crossings = validate(trial)
-                timing = accompaniment_timing_errors(trial, bpb)
-                jumps = lead_jump_errors(trial)
-                if hard or seconds or crossings or timing or jumps:
-                    raise GenerationRejected(
-                        f'iteration {iteration+1} validation failed '
-                        f'hard={hard[:1]} seconds={seconds[:1]} '
-                        f'crossings={crossings[:1]} timing={timing[:1]} '
-                        f'jumps={jumps[:1]}')
-
-                success = trial
-                history.append({
-                    'iteration': iteration + 1,
-                    'attempt': attempt + 1,
-                    'lead_notes': len(trial.get('lead', ())),
-                    'counter_notes': len(trial.get('counter', ())),
-                    'bass_notes': len(trial.get('bass', ())),
-                    'inner_notes': len(trial.get('inner', ())),
-                    'pitch_changes_from_previous': {
-                        voice: sum(
-                            int(a['step']) != int(b['step'])
-                            for a, b in zip(previous.get(voice, ()), trial.get(voice, ()))
-                        )
-                        for voice in ('lead', 'counter', 'bass', 'inner')
-                    },
-                })
-                break
-            except GenerationRejected as exc:
-                last_error = exc
-
-        if success is None:
-            raise GenerationRejected(
-                f'pitch regeneration iteration {iteration+1} failed after '
-                f'{PITCH_REGEN_MAX_RETRIES} attempts: {last_error}')
-        current = success
-
-    return current, history
 
 
 def accompaniment_timing_errors(voices, bpb):
+    """Return accompaniment timing violations."""
     errors=[]; eps=2e-6
     for voice, xs in voices.items():
         for e in xs:
             bar=int((e['start_beat']+eps)//bpb)
-            # The fixed Lead IR may legally sustain across half-bar and bar
-            # boundaries.  Generated accompaniment voices remain bar-local.
-            if voice != 'lead' and e['start_beat']+e['duration_beats']>(bar+1)*bpb+eps:
+            if e['start_beat']+e['duration_beats']>(bar+1)*bpb+eps:
                 errors.append((voice,'bar_overrun',bar,e['start_beat'],e['duration_beats']))
-    lead=sorted(voices.get('lead', []), key=lambda e:e['start_beat'])
-    if any(a['start_beat']+a['duration_beats']>b['start_beat']+eps for a,b in zip(lead,lead[1:])):
-        errors.append(('lead','overlap'))
     for voice in ('bass','inner','counter'):
         by_bar={}
         for e in voices.get(voice,[]): by_bar.setdefault(int((e['start_beat']+eps)//bpb),[]).append(e)
@@ -1728,178 +1092,8 @@ def validate(voices):
                             crossings.append((a,b,e['start_beat'],e['name'],f['name']))
     return hard,seconds,crossings
 
-def lead_jump_errors(voices_or_lead):
-    """Return adjacent Lead jumps above the hard ten-distance limit.
-
-    Compatibility: callers may pass either the whole ``voices`` dictionary
-    (as main.py does) or the Lead event list directly (as generate_once does).
-    """
-    lead = voices_or_lead.get('lead', []) if isinstance(voices_or_lead, dict) else voices_or_lead
+def lead_jump_errors(lead):
+    """Return adjacent Lead jumps above the configured hard limit."""
     return [(a['start_beat'], b['start_beat'], abs(degree(b['step']) - degree(a['step'])))
             for a, b in zip(lead, lead[1:])
             if abs(degree(b['step']) - degree(a['step'])) > LEAD_MAX_JUMP_DEGREES]
-
-def diagnostics(voices, plan, bpb):
-    lead = voices.get('lead', [])
-    segments = [seg for h in plan for seg in h['chord_segments']]
-    total_harmony = sum(float(seg['duration']) for seg in segments) or 1.0
-    cse_chord = sum(chord_cse_score(CHORDS[seg['chord_id']]) * float(seg['duration'])
-                    for seg in segments) / total_harmony
-    lead_cse = []
-    for e in lead:
-        bar = min(len(plan) - 1, int(e['start_beat'] // bpb))
-        chord = CHORDS[harmony_segment_at(plan[bar], e['start_beat'] - bar*bpb)['chord_id']]
-        lead_cse.append(vertical_cse_score(chord, e['step']))
-    absolute = []
-    for voice, xs in voices.items():
-        for e in xs:
-            others = {v: [x for x in ys if x is not e] for v, ys in voices.items()}
-            value, coverage = absolute_vertical_cse_interval(
-                e['step'], others, float(e['start_beat']), float(e['duration_beats']))
-            if value is not None and coverage > 0:
-                absolute.append((value, float(e['duration_beats']) * coverage))
-    absolute_mean = (sum(v*w for v, w in absolute) / sum(w for _, w in absolute)) if absolute else None
-    chord_usage = {cid: 0 for cid in CHORDS}
-    function_counts = {f: 0 for f in 'TSCD'}
-    for seg in segments:
-        chord_usage[seg['chord_id']] += 1
-        function_counts[seg['function']] += 1
-    used = {cid for cid, n in chord_usage.items() if n}
-    moves = [abs(degree(b['step']) - degree(a['step'])) for a, b in zip(lead, lead[1:])]
-    same_pc = sum(a['step'] % OCT == b['step'] % OCT for a, b in zip(lead, lead[1:]))
-    aba = sum(a['step'] % OCT == c['step'] % OCT for a, c in zip(lead, lead[2:]))
-    secondary = 'counter' if voices.get('counter') else None
-    lead_mean_step = (sum(float(e['step']) for e in lead) / len(lead)) if lead else None
-    lead_register_offset = (lead_mean_step - LEAD_REGISTER_TARGET_STEP) if lead_mean_step is not None else None
-    return {
-        'lead_notes': len(lead),
-        'lead_max_jump_degrees': max(moves, default=0),
-        'lead_same_pc_rate': round(same_pc / max(1, len(lead)-1), 4),
-        'lead_aba_pc_rate': round(aba / max(1, len(lead)-2), 4),
-        'lead_register_target_step': round(float(LEAD_REGISTER_TARGET_STEP), 4),
-        'lead_register_mean_step': round(float(lead_mean_step), 4) if lead_mean_step is not None else None,
-        'lead_register_mean_offset_steps': round(float(lead_register_offset), 4) if lead_register_offset is not None else None,
-        'lead_register_high_multiplier': float(LEAD_REGISTER_HIGH_MULTIPLIER),
-        'lead_register_low_multiplier': float(LEAD_REGISTER_LOW_MULTIPLIER),
-        'lead_section_base_centres': {k: list(v) for k, v in LEAD_SECTION_BASE_CENTRES.items()},
-        'lead_phrase_amplitudes': list(LEAD_PHRASE_AMPLITUDES),
-        'lead_bar_amplitudes': list(LEAD_BAR_AMPLITUDES),
-        'lead_centre_jitter_degrees': int(LEAD_CENTRE_JITTER_DEGREES),
-        'scale_note_count': len(PCS),
-        'lead_normal_flow_max_degrees': int(LEAD_NORMAL_FLOW_MAX),
-        'lead_medium_leap_max_degrees': int(LEAD_MEDIUM_LEAP_MAX),
-        'lead_preferred_max_leap_degrees': int(LEAD_PREFERRED_MAX_LEAP),
-        'lead_strong_recovery_threshold_degrees': int(LEAD_STRONG_RECOVERY_THRESHOLD),
-        'bass_notes_per_bar': round(len(voices.get('bass', [])) / max(1, len(plan)), 4),
-        'secondary_voice_mode': secondary,
-        'prime_rewards': _active_prime_rewards(),
-        'prime_reward_runtime': getattr(cse_rt, '__file__', None),
-        'function_counts': function_counts,
-        'chord_usage': {cid: n for cid, n in chord_usage.items() if n},
-        'palette_color_family_count': sum(bool(set(ids) & used) for ids in PALETTE_COLOR_FAMILIES.values()),
-        'cse_chord_mean': round(cse_chord, 5),
-        'cse_lead_vertical_raw_mean': round(sum(lead_cse) / max(1, len(lead_cse)), 5),
-        'cse_actual_register_raw_mean': round(absolute_mean, 5) if absolute_mean is not None else None,
-        'cse_lead_vertical_percentile_mean': round(sum(lead_cse) / max(1, len(lead_cse)), 5),
-        'cse_absolute_vertical_percentile_mean': round(absolute_mean, 5) if absolute_mean is not None else None,
-    }
-
-def generate_once(seed, bars, bpm, motif_degrees, time_signature, allow_sixteenth=False,
-                  pitch_regen_iterations=None):
-    ts, bpb = normalize_time_signature(time_signature)
-    harmony_rng = random.Random(seed)
-    plan = harmony_plan(bars, harmony_rng, bpb)
-
-    lead_rng = random.Random(int(seed) ^ 0x13579BDF)
-    lead_palette = make_rhythm_palette(lead_rng, bpb)
-    lead = generate_lead(bars, plan, lead_rng, motif_degrees, bpb, lead_palette,
-                         allow_sixteenth=allow_sixteenth)
-    voices = {'lead': lead}
-
-    counter_rng = random.Random(int(seed) ^ 0x2468ACE1)
-    counter_palette = make_rhythm_palette(counter_rng, bpb)
-    counter_mode, counter_line = generate_counter_voice(
-        bars, plan, lead, counter_rng, bpb, counter_palette)
-    voices['counter'] = counter_line
-
-    bass_rng = random.Random(int(seed) ^ 0x6C39B5A7)
-    bass_palette = make_rhythm_palette(bass_rng, bpb)
-    voices['bass'] = generate_bass(bars, plan, dict(voices), bass_rng, bpb, bass_palette)
-
-    inner_rng = random.Random(int(seed) ^ 0x51A7E2C3)
-    inner_palette = make_rhythm_palette(inner_rng, bpb)
-    voices['inner'] = generate_inner(bars, plan, dict(voices), inner_rng, bpb, inner_palette)
-
-    # Rhythm has now been chosen exactly once for all four voices.  Every
-    # following pass changes pitch fields only.
-    active_pitch_regen_iterations = (
-        int(PITCH_REGEN_ITERATIONS)
-        if pitch_regen_iterations is None
-        else max(0, int(pitch_regen_iterations))
-    )
-    voices, pitch_iteration_history = _regenerate_all_pitches_iteratively(
-        voices, plan, seed, bpb, active_pitch_regen_iterations)
-
-    order = ('bass', 'inner', 'counter', 'lead')
-    voices = {k: voices[k] for k in order if k in voices}
-    hard, seconds, crossings = validate(voices)
-    timing = accompaniment_timing_errors(voices, bpb)
-    jumps = lead_jump_errors(lead)
-    if hard or seconds or crossings or timing or jumps:
-        raise GenerationRejected(
-            f'generation validation failed hard={hard[:2]} seconds={seconds[:2]} '
-            f'crossings={crossings[:2]} timing={timing[:2]} jumps={jumps[:2]}')
-
-    palettes = {
-        'lead': rhythm_palette_metadata(lead_palette),
-        'counter': rhythm_palette_metadata(counter_palette),
-        'inner': rhythm_palette_metadata(inner_palette),
-        'bass': rhythm_palette_metadata(bass_palette),
-    }
-    return {
-        'format': 'ScaleWeaverScore/1', 'seed': seed, 'tempo_bpm': bpm,
-        'time_signature': ts, 'beats_per_bar': bpb, 'bars': bars,
-        'duration_seconds': bars * bpb * 60 / bpm,
-        'configuration': hr.SCALE.to_json_dict(),
-        'tuning': {'system': 'edo', 'edo': OCT,
-                   'scale_id': SCALE_ID, 'scale_name': SCALE_NAME,
-                   'base_note': BASE_NOTE,
-                   'base_freq_hz': BASE_FREQ, 'base_freq': BASE_FREQ,
-                   'pcs': list(PCS), 'names': list(NAMES),
-                   'pitch_classes': [{'name': n, 'step': p} for n, p in zip(NAMES, PCS)]},
-        'rhythmic_system': {
-            'model': 'four independent melodic lines with motif recall; fixed-rhythm iterative pitch regeneration; bar-sequence and chord-arpeggio devices disabled',
-            'allow_sixteenth': bool(allow_sixteenth),
-            'fancy_rhythm_first_class': True,
-            'melodic_palettes': palettes,
-        },
-        'harmonic_system': {
-            'model': 'four-line iterative counterpoint; fixed rhythms, regenerated pitches; realised other-voice CSE plus virtual harmony field; fixed parallel-3/7 modes removed',
-            'chords': {
-                cid: {'name': c.name, 'pcs': list(c.pcs), 'ratio': c.ratio, 'function': c.function}
-                for cid, c in CHORDS.items()
-            },
-        },
-        'harmony_plan': plan,
-        'voice_layout': {
-            'four_part_counterpoint': True,
-        'relative_purity_enabled': True,
-            'secondary_voice_mode': 'counter',
-            'secondary_voice_candidates': ['counter'],
-            'secondary_voice_mutually_exclusive': False,
-            'fixed_parallel_three_seven_removed': True,
-            'pitch_regeneration_iterations': int(active_pitch_regen_iterations),
-        },
-        'voices': voices,
-        'validation': {
-            'hard_wolves': 0, 'step_seconds': 0, 'voice_crossings': 0,
-            'accompaniment_timing_errors': 0, 'lead_jumps_over_configured_limit': 0,
-        },
-        'diagnostics': {
-            **diagnostics(voices, plan, bpb),
-            'pitch_regeneration_iterations': int(active_pitch_regen_iterations),
-            'pitch_regeneration_history': pitch_iteration_history,
-            'fixed_rhythm_during_regeneration': True,
-            'fixed_parallel_three_seven_removed': True,
-        },
-    }

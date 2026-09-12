@@ -25,6 +25,8 @@ from datetime import date
 from pathlib import Path
 from xml.sax.saxutils import escape
 
+from measure_timeline import locate, resolved_measure_map
+
 # ---------------------------------------------------------------------------
 # Runtime tuning / notation configuration (filled from score["tuning"])
 # ---------------------------------------------------------------------------
@@ -417,16 +419,17 @@ def rest_xml(dur):
     return ''.join(out)
 
 
-def measure_rest_xml(bpb, sig_d):
+def measure_rest_xml(duration_beats):
+    ticks = round(float(duration_beats) * 480)
     return (
         f'{_i(2)}<Rest>\n'
         f'{_i(3)}<durationType>measure</durationType>\n'
-        f'{_i(3)}<duration>{bpb}/{sig_d}</duration>\n'
+        f'{_i(3)}<duration>{_frac(ticks, 1920)}</duration>\n'
         f'{_i(2)}</Rest>\n'
     )
 
 
-def build_bar(events, bar, bpb, shift=0, diatonic=0):
+def build_bar(events, measure_start, measure_duration, shift=0, diatonic=0):
     """Build one measure, preserving complete 3:2 tuplets even through rests.
 
     Earlier versions only grouped consecutive *chords*.  A legal triplet pattern
@@ -436,12 +439,12 @@ def build_bar(events, bar, bpb, shift=0, diatonic=0):
     """
     grouped = {}
     for e in events:
-        beat = round(float(e['start_beat']) - bar * bpb, 6)
+        beat = round(float(e['start_beat']) - float(measure_start), 6)
         dur = round(float(e['duration_beats']), 6)
         grouped.setdefault((beat, dur, bool(e.get('tie_start')), bool(e.get('tie_stop'))), []).append(int(e['step']))
 
     if not grouped:
-        return measure_rest_xml(bpb, 4)
+        return measure_rest_xml(measure_duration)
 
     items = []          # (kind, dur, steps); kind in {'rest', 'chord'}
     cursor = 0.0
@@ -450,8 +453,8 @@ def build_bar(events, bar, bpb, shift=0, diatonic=0):
             items.append(('rest', round(beat - cursor, 6), None))
         items.append(('chord', dur, (steps, tie_start, tie_stop)))
         cursor = beat + dur
-    if bpb > cursor + 1e-6:
-        items.append(('rest', round(bpb - cursor, 6), None))
+    if measure_duration > cursor + 1e-6:
+        items.append(('rest', round(measure_duration - cursor, 6), None))
 
     def triplet_piece(item):
         pieces = duration_pieces(item[1])
@@ -611,7 +614,7 @@ def _frac(n, d):
     return f'{int(n) // g}/{int(d) // g}'
 
 
-def first_measure_header(score, register, bpb, sig_n, sig_d, staff_id, with_tempo):
+def first_measure_header(score, register, end_bpb, sig_n, sig_d, staff_id, with_tempo):
     subtype, shift, centre, text, diatonic = register
     s = ''
     s += f'{_i(1)}<Clef>\n'
@@ -642,7 +645,7 @@ def first_measure_header(score, register, bpb, sig_n, sig_d, staff_id, with_temp
         s += f'{_i(1)}</Tempo>\n'
     if subtype != 'none':
         bars = int(score['bars'])
-        frac = _frac(bpb, 4)
+        frac = _frac(round(float(end_bpb) * 480), 1920)
         s += f'{_i(1)}<Spanner type="Ottava">\n'
         s += f'{_i(2)}<Ottava>\n'
         s += f'{_i(3)}<subtype>{subtype}</subtype>\n'
@@ -655,6 +658,15 @@ def first_measure_header(score, register, bpb, sig_n, sig_d, staff_id, with_temp
         s += f'{_i(2)}</next>\n'
         s += f'{_i(1)}</Spanner>\n'
     return s
+
+
+def time_signature_xml(sig_n, sig_d):
+    return (
+        f'{_i(1)}<TimeSig>\n'
+        f'{_i(2)}<sigN>{int(sig_n)}</sigN>\n'
+        f'{_i(2)}<sigD>{int(sig_d)}</sigD>\n'
+        f'{_i(1)}</TimeSig>\n'
+    )
 
 
 def last_measure_footer(register, score, bpb):
@@ -674,7 +686,7 @@ def last_measure_footer(register, score, bpb):
     return s
 
 
-def staff_music_xml(score, voice, events, register, staff_id, bpb, sig_n, sig_d):
+def staff_music_xml(score, voice, events, register, staff_id, measure_map):
     bars = int(score['bars'])
     shift = register[1]
     diatonic = register[4]
@@ -687,8 +699,11 @@ def staff_music_xml(score, voice, events, register, staff_id, bpb, sig_n, sig_d)
         end = start + float(e['duration_beats'])
         cursor = start
         while cursor < end - 1e-8:
-            bar = int(cursor // bpb)
-            bar_end = min(end, (bar + 1) * bpb)
+            bar, _ = locate(measure_map, cursor + 1e-9)
+            measure = measure_map[bar]
+            measure_end = (float(measure['start_beat'])
+                           + float(measure['duration_beats']))
+            bar_end = min(end, measure_end)
             fragment = dict(e)
             fragment['start_beat'] = round(cursor, 6)
             fragment['duration_beats'] = round(bar_end - cursor, 6)
@@ -698,14 +713,25 @@ def staff_music_xml(score, voice, events, register, staff_id, bpb, sig_n, sig_d)
             cursor = bar_end
     out = [f'<Staff id="{staff_id}">\n']
     for bar in range(bars):
-        out.append(f'{_i(0)}<Measure>\n')
+        measure = measure_map[bar]
+        duration = float(measure['duration_beats'])
+        sig_n, sig_d = map(int, str(measure['time_signature']).split('/', 1))
+        nominal = 4.0 * sig_n / sig_d
+        length = ('' if math.isclose(duration, nominal, abs_tol=1e-8)
+                  else f' len="{_frac(round(duration * 480), 1920)}"')
+        out.append(f'{_i(0)}<Measure{length}>\n')
         out.append(f'{_i(1)}<voice>\n')
         if bar == 0:
             out.append(first_measure_header(
-                score, register, bpb, sig_n, sig_d, staff_id, with_tempo=True))
-        out.append(build_bar(by_bar.get(bar, []), bar, bpb, shift, diatonic))
+                score, register, float(measure_map[-1]['duration_beats']),
+                sig_n, sig_d, staff_id, with_tempo=True))
+        elif str(measure['time_signature']) != str(measure_map[bar - 1]['time_signature']):
+            out.append(time_signature_xml(sig_n, sig_d))
+        out.append(build_bar(
+            by_bar.get(bar, []), measure['start_beat'], duration, shift, diatonic))
         if bar == bars - 1:
-            out.append(last_measure_footer(register, score, bpb))
+            out.append(last_measure_footer(
+                register, score, float(measure_map[0]['duration_beats'])))
         out.append(f'{_i(1)}</voice>\n')
         out.append(f'{_i(0)}</Measure>\n')
     out.append('</Staff>\n')
@@ -735,9 +761,7 @@ def generate(score, regs=None, staff_order=None, layout_mode='page') -> str:
     staff_order = tuple(staff_order or discover_staff_order(score))
     if layout_mode not in ('page', 'system'):
         raise ValueError(f'unsupported MuseScore layout mode: {layout_mode!r}')
-    bpb = float(score['beats_per_bar'])
-    ts = str(score.get('time_signature', '4/4')).split('/', 1)
-    sig_n, sig_d = int(ts[0]), int(ts[1])
+    measure_map = resolved_measure_map(score)
     if regs is None:
         regs = compute_registers(score, staff_order)
 
@@ -783,7 +807,7 @@ def generate(score, regs=None, staff_order=None, layout_mode='page') -> str:
     for i, voice in enumerate(staff_order, start=1):
         out.append(staff_music_xml(
             score, voice, score['voices'].get(voice, []), regs[voice], i,
-            bpb, sig_n, sig_d))
+            measure_map))
     out.append('  </Score>\n')
     out.append('</museScore>\n')
     return ''.join(out)

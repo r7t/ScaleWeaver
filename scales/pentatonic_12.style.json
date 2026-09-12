@@ -43,10 +43,6 @@
   },
   "annealing": {
     "enabled": true,
-    "subset_correction": {
-      "triad": 0.3333333333333333,
-      "tetrad": 0.3333333333333333
-    },
     "objective_weights": {
       "attack": 2.0,
       "sounding": 6.0,
@@ -55,24 +51,16 @@
     },
     "cse_loss_polynomials": {
       "two_note_attack": {
-        "a": 1.0,
-        "b": -2.0,
-        "c": 1.0
+        "a4": 0.0, "a3": 0.0, "a2": 1.0, "a1": -2.0, "a0": 1.0
       },
       "three_note_attack": {
-        "a": 1.0,
-        "b": -1.0,
-        "c": 0.0
+        "a4": 0.0, "a3": 0.0, "a2": 1.0, "a1": -1.0, "a0": 0.0
       },
       "four_note_attack": {
-        "a": 1.0,
-        "b": 0.0,
-        "c": 0.0
+        "a4": 0.0, "a3": 0.0, "a2": 1.0, "a1": 0.0, "a0": 0.0
       },
       "sounding": {
-        "a": 1.0,
-        "b": -1.0,
-        "c": 0.0
+        "a4": 0.0, "a3": 0.0, "a2": 1.0, "a1": -1.0, "a0": 0.0
       }
     },
     "attack": {
@@ -80,9 +68,7 @@
         "2": 1.0,
         "3": 1.0,
         "4": 1.0
-      },
-      "percentile_excess_weight": 15.0,
-      "percentile_excess_squared_weight": 30.0
+      }
     },
     "background_voice_weights": {
       "counter": 0.58,

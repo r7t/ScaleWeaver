@@ -33,14 +33,6 @@
     "step_distances": [
       67
     ],
-    "passes": 8,
-    "max_shift_degrees": {
-      "lead": 4,
-      "counter": 5,
-      "inner": 6,
-      "bass": 6,
-      "inner2": 6
-    },
     "soft_penalty": 0.72
   },
   "melody": {

@@ -1,18 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""ScaleWeaver WAV renderer v27 — modular raw/SF2 + exact-F0 singing voicebank.
+"""ScaleWeaver WAV renderer — modular raw/SF2 + exact-F0 singing voicebank.
 
 Modules in the same directory:
   raw_synth.py        native waveform backend
   sf2_synth.py        SoundFont2/FluidSynth backend
-  voicebank_synth.py  preferred mnemonic singing backend: pre-rendered exact-F0 singing WAVs
-  voice_synth.py      optional legacy Neural-TTS/Praat fallback
-
-Important change in v27:
-  --sing-lead now defaults to --voice-backend voicebank.
-  The voicebank path performs NO TTS, NO PSOLA pitch shifting, NO time stretching,
-  and NO internal phoneme splicing at render time.  It directly plays a sample
-  that was already sung at the correct ScaleWeaver F0.
+  voicebank_synth.py  mnemonic singing backend using pre-rendered exact-F0 WAVs
 """
 from __future__ import annotations
 
@@ -92,40 +85,6 @@ def write_wav(path: str | Path, audio: np.ndarray, sr: int = DEFAULT_SR) -> None
         wf.writeframes(pcm.tobytes())
 
 
-def _mix_legacy_neural_voice(
-    audio: np.ndarray,
-    score: dict,
-    sr: int,
-    *,
-    gain: float,
-    octave_shift: int,
-    attack_offset_sec: float,
-    voice: str,
-    tts_rate: str,
-    cache_dir: str | Path | None,
-    verbose: bool,
-) -> np.ndarray:
-    """Lazy import so v27 works even if the old Neural-TTS module is absent."""
-    try:
-        from voice_synth import mix_lead_solfege_singing
-    except ImportError as exc:
-        raise RuntimeError(
-            "--voice-backend neural requires the legacy voice_synth.py next to wavgen8.py. "
-            "The preferred v27 backend is voicebank."
-        ) from exc
-    kwargs = dict(
-        gain=gain,
-        octave_shift=octave_shift,
-        voice=voice,
-        tts_rate=tts_rate,
-        attack_offset_sec=attack_offset_sec,
-        verbose=verbose,
-    )
-    if cache_dir:
-        kwargs["cache_dir"] = cache_dir
-    return mix_lead_solfege_singing(audio, score, sr, **kwargs)
-
-
 def render_file(
     score_path: str | Path,
     wav_path: str | Path,
@@ -137,16 +96,11 @@ def render_file(
     quantize_edo: int | None = None,
     quantize_base_freq: float | None = None,
     sing_lead: bool = False,
-    voice_backend: str = "voicebank",
     sing_gain: float = DEFAULT_SING_GAIN,
     sing_octaves: int = DEFAULT_VOICE_OCTAVES,
     sing_attack_offset_sec: float = DEFAULT_ATTACK_OFFSET_SEC,
     voicebank_dir: str | Path = DEFAULT_BANK_DIR,
     voicebank_missing: str = "error",
-    # Legacy neural fallback args:
-    sing_voice: str = "zh-CN-XiaoxiaoNeural",
-    sing_rate: str = "-10%",
-    sing_cache_dir: str | Path | None = None,
     **sf2_kwargs,
 ) -> None:
     with open(score_path, "r", encoding="utf-8") as f:
@@ -173,31 +127,17 @@ def render_file(
         raise ValueError(f"Unknown backend: {backend}")
 
     if sing_lead:
-        if voice_backend == "voicebank":
-            audio = mix_lead_voicebank(
-                audio,
-                score,
-                sr,
-                bank_dir=voicebank_dir,
-                gain=sing_gain,
-                octave_shift=sing_octaves,
-                attack_offset_sec=sing_attack_offset_sec,
-                missing=voicebank_missing,
-                verbose=verbose,
-            )
-        elif voice_backend == "neural":
-            audio = _mix_legacy_neural_voice(
-                audio, score, sr,
-                gain=sing_gain,
-                octave_shift=sing_octaves,
-                attack_offset_sec=sing_attack_offset_sec,
-                voice=sing_voice,
-                tts_rate=sing_rate,
-                cache_dir=sing_cache_dir,
-                verbose=verbose,
-            )
-        else:
-            raise ValueError(f"Unknown voice backend: {voice_backend}")
+        audio = mix_lead_voicebank(
+            audio,
+            score,
+            sr,
+            bank_dir=voicebank_dir,
+            gain=sing_gain,
+            octave_shift=sing_octaves,
+            attack_offset_sec=sing_attack_offset_sec,
+            missing=voicebank_missing,
+            verbose=verbose,
+        )
 
     write_wav(wav_path, audio, sr)
 
@@ -216,8 +156,6 @@ def main() -> None:
     # Singing overlay.
     ap.add_argument("--sing-lead", action="store_true",
                     help="Overlay ScaleWeaver mnemonic singing on lead notes.")
-    ap.add_argument("--voice-backend", choices=("voicebank", "neural"), default="voicebank",
-                    help="voicebank = preferred exact-F0 singing WAV bank; neural = legacy TTS/Praat fallback.")
     ap.add_argument("--sing-gain", type=float, default=DEFAULT_SING_GAIN)
     ap.add_argument("--sing-octaves", type=int, default=DEFAULT_VOICE_OCTAVES)
     ap.add_argument("--sing-attack-offset", dest="sing_attack_offset_sec", type=float,
@@ -227,11 +165,6 @@ def main() -> None:
                     help="Directory containing voicebank manifest.json and configured exact-F0 WAVs.")
     ap.add_argument("--voicebank-missing", choices=("error", "skip"), default="error",
                     help="How to handle a missing sample required by the score.")
-
-    # Legacy Neural-TTS fallback options.
-    ap.add_argument("--sing-voice", default="zh-CN-XiaoxiaoNeural")
-    ap.add_argument("--sing-rate", default="-10%")
-    ap.add_argument("--sing-cache-dir", default=None)
 
     # Raw backend.
     ap.add_argument("--decay-scale", type=float, default=DECAY_SCALE)
@@ -268,15 +201,11 @@ def main() -> None:
         quantize_edo=args.quantize_edo,
         quantize_base_freq=args.quantize_base_freq,
         sing_lead=args.sing_lead,
-        voice_backend=args.voice_backend,
         sing_gain=args.sing_gain,
         sing_octaves=args.sing_octaves,
         sing_attack_offset_sec=args.sing_attack_offset_sec,
         voicebank_dir=args.voicebank_dir,
         voicebank_missing=args.voicebank_missing,
-        sing_voice=args.sing_voice,
-        sing_rate=args.sing_rate,
-        sing_cache_dir=args.sing_cache_dir,
         sf2_path=args.sf2_path,
         sf2_map_path=args.sf2_map_path,
         force_bank=args.sf2_bank,

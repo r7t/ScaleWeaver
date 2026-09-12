@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Create default Lead anti-ABAB n-gram files for scale JSON files.
 
-Scans the current directory for scale JSON files. For each JSON:
+Scans the supplied directory (current directory by default). For each JSON:
 - requires top-level "edo" and "pcs" to be treated as a scale config;
 - reads "ngram_file" from the companion style profile;
 - otherwise uses "<json_stem>.ngram.txt";
@@ -17,6 +17,7 @@ A and B are allowed to be equal.
 from __future__ import annotations
 
 import json
+import argparse
 from pathlib import Path
 from scale_config import load_scale
 
@@ -87,8 +88,14 @@ def build_ngram_text(pcs: list[int]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def main() -> int:
-    root = Path.cwd()
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("directory", nargs="?", default=".",
+                        help="directory containing ScaleDefinition JSON files")
+    args = parser.parse_args(argv)
+    root = Path(args.directory).expanduser().resolve()
+    if not root.is_dir():
+        parser.error(f"not a directory: {root}")
     json_files = sorted(root.glob("*.json"))
 
     if not json_files:

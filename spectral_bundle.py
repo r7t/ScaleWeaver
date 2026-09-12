@@ -245,10 +245,10 @@ def ensure_bundle(spec, directory='.', **kwargs):
 
 
 class SpectralBundle:
-    """Three read-only mmaps with the existing seven-table CSE lookup contract.
+    """Three read-only metric maps with seven cardinality/domain tables.
 
-    entry()/score() default to pure CSE for compatibility. mixed_entry() is
-    explicit and never linearly blends percentiles.
+    ``entry`` and ``score`` read one metric; ``mixed_entry`` computes the
+    configured raw blend and ranks it against the complete blended table.
     """
     def __init__(self, manifest_path, spec=None, parameters=None, *, allow_superset=False):
         self.manifest_path = Path(manifest_path).resolve()

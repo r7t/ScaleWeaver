@@ -71,10 +71,6 @@ def iter_six_ratio_records(data):
         yield (full_ratio, *subset_ratios), full_ints, subset_ints
 
 
-# 兼容曾经导入旧函数名的外部脚本。
-iter_five_ratio_records = iter_six_ratio_records
-
-
 def prime_factor_coverage(records):
     """按完整 canonical 五整数比例统计每个质因子的出现率。"""
     counts = {p: 0 for p in PRIMES}

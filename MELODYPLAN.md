@@ -2,7 +2,7 @@
 
 新版默认前端分为两个层次：`melody_plan.py` 先决定材料之间的依赖，
 `joint_frontend_generate.py` 再联合选择 Lead 音高、Lead 节奏与和弦进行。
-结果仍写入 `ScaleWeaverFrontEndIR/1`，三个伴奏声部、全曲退火、CSE 与导出模块未改写。
+结果写入 `ScaleWeaverFrontEndIR/1`，再由后端生成三或四个伴奏声部并执行全曲退火。
 
 ## 计划结构
 
@@ -46,11 +46,12 @@
 `dense_half_candidate_probability` 控制。使用 `--no-sixteenth` 时，4/4 拍的半小节
 仍因节奏网格限制而最多容纳 4 音。
 
-`melody_plan.joint_generation.allow_cross_unit_ties` 默认开启。前端会以
-`cross_unit_tie_probability` 选择少量半小节入口作为延音，而不是新起音；它们在
-IR 中合并为可跨半小节、跨小节的 Lead 长音。MuseScore 导出会把跨小节长音拆成
-带连音线的记谱片段。`allow_phrase_rests` 默认关闭；开启后仅在回答句或清算句
-边界按 `phrase_rest_probability` 缩短句末音，并使用真实事件间隙表示休止。
+`melody_plan.joint_generation.allow_cross_unit_ties` 默认开启。前端分别以
+`cross_half_bar_tie_probability` 和 `cross_bar_tie_probability` 选择少量半小节、
+小节入口作为延音，而不是新起音。延续音必须是进入和弦的和弦音；和声变化时还
+必须是前后和弦的共同音。段落开头保留新起音，终止位置降低延音概率，连续时长由
+`max_tied_duration_beats` 限制。它们在 IR 中合并为可跨半小节、跨小节的 Lead
+长音。MuseScore 导出会把跨小节长音拆成带连音线的记谱片段。
 
 ```bash
 python main.py --scale scales/tiangan_72.json --seed 666 --bars 48 \
@@ -65,9 +66,4 @@ python joint_frontend_generate.py --scale scales/tiangan_72.json \
   --output 666.frontend.json
 ```
 
-旧逻辑仍可用于对照：
-
-```bash
-python main.py --legacy-frontend --scale scales/tiangan_72.json \
-  --seed 666 --bars 48 --output 666.legacy.json
-```
+联合前端是当前唯一的内部创作前端。外部旋律来源通过前端 IR、节奏模仿或完整旋律重调律接入。

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read a ScaleWeaver front-end IR and generate/anneal the three lower voices."""
+"""Read a front-end IR and generate/anneal its three or four accompaniment voices."""
 from __future__ import annotations
 
 import argparse
@@ -13,26 +13,106 @@ import harmony_rhythm as hr
 import score_builder as sb
 from annealing_config import resolve_annealing
 from frontend_ir import content_sha256, load_ir, validate_ir
+from measure_timeline import is_uniform, locate, resolved_measure_map, total_beats
 
 
 FOUR_PART_VOICES = ("bass", "inner", "counter", "lead")
 FIVE_PART_VOICES = ("bass", "inner", "inner2", "counter", "lead")
 
 
-def _rescue_time_points(lead, plan, bars, bpb):
+def _rescue_time_points(lead, plan, bars, bpb, measure_map=None):
     """Smallest slices on which Lead and background harmony are constant."""
-    points = {0.0, float(bars) * float(bpb)}
+    timeline = measure_map or [
+        {"start_beat": bar * float(bpb), "duration_beats": float(bpb)}
+        for bar in range(int(bars))]
+    points = {0.0, total_beats(timeline)}
     for event in lead:
         points.add(float(event["start_beat"]))
         points.add(float(event["start_beat"]) + float(event["duration_beats"]))
     for bar, row in enumerate(plan[:bars]):
-        base = bar * float(bpb)
+        base = float(timeline[bar]["start_beat"])
+        duration = float(timeline[bar]["duration_beats"])
         points.add(base)
-        points.add(base + float(bpb))
+        points.add(base + duration)
         for segment in row["chord_segments"]:
             points.add(base + float(segment["offset"]))
             points.add(base + float(segment["offset"]) + float(segment["duration"]))
     return sorted(round(x, 6) for x in points)
+
+
+def _partition_dynamic_measure(duration, voice, rng, cadence=False):
+    """Produce an exact rhythm for a nonstandard measure duration."""
+    duration = float(duration)
+    units = round(duration * 4)
+    if units <= 0 or not math.isclose(units / 4.0, duration, abs_tol=1e-8):
+        return (duration,)
+    if voice == "bass":
+        attacks = 1 if cadence or units <= 6 else 2
+    else:
+        attacks = max(1, min(4, round(duration * 1.25)))
+    attacks = min(attacks, units)
+    if attacks == 1:
+        return (duration,)
+    # Random positive integer composition in sixteenth-note units. Prefer
+    # eighth-note cut points without forbidding genuine sixteenth patterns.
+    candidates = list(range(1, units))
+    weights = [2.5 if point % 2 == 0 else 1.0 for point in candidates]
+    cuts = []
+    while len(cuts) < attacks - 1 and candidates:
+        chosen = rng.choices(candidates, weights=weights, k=1)[0]
+        index = candidates.index(chosen)
+        cuts.append(chosen); candidates.pop(index); weights.pop(index)
+    points = [0] + sorted(cuts) + [units]
+    return tuple((b - a) / 4.0 for a, b in zip(points, points[1:]))
+
+
+def _generate_dynamic_counterpoint_line(voice, plan, measure_map, existing, rng,
+                                        rhythm_palette, reference_voice):
+    """Dynamic-measure counterpart of score_builder._generate_counterpoint_line."""
+    events, recent = [], []
+    prev = prev2 = None
+    prev_vertical_distance = None
+    centres = sb._line_phrase_centres(voice, len(measure_map), rng)
+    fancy_key = "counter" if voice.startswith("counter") else voice
+    fancy_rate = sb.COUNTERPOINT_FANCY_RHYTHM_RATE.get(
+        fancy_key, sb.COUNTERPOINT_FANCY_RHYTHM_RATE["inner"])
+    for bar, h in enumerate(plan):
+        measure = measure_map[bar]
+        duration = float(measure["duration_beats"])
+        cadence = (bar % 8 == 7) or (bar == len(measure_map) - 1)
+        if math.isclose(duration, 3.0, abs_tol=1e-8):
+            if voice == "bass":
+                durations = sb._choose_sparse_bass_rhythm(rng, 3.0, cadence=cadence)
+            else:
+                durations = sb._choose_melodic_rhythm(
+                    bar, rng, 3.0, rhythm_palette, cadence=cadence,
+                    allow_sixteenth=False, fancy_rate=fancy_rate)
+        else:
+            durations = _partition_dynamic_measure(duration, voice, rng, cadence)
+        sb.validate_rhythm_bar(durations, duration, f"{voice}_dynamic_measure")
+        offset = 0.0
+        pattern_name = sb._melodic_rhythm_name(durations)
+        for note_duration in durations:
+            segment = hr.harmony_segment_at(h, offset)
+            chord = hr.CHORDS[segment["chord_id"]]
+            start = float(measure["start_beat"]) + offset
+            pitch = sb._choose_counterpoint_pitch(
+                voice, prev, prev2, recent, chord, existing, start,
+                note_duration, rng, centres[bar], reference_voice,
+                prev_vertical_distance)
+            reference_step = sb._active_reference_step(
+                existing, reference_voice, start, note_duration)
+            if reference_step is not None:
+                prev_vertical_distance = abs(sb.degree(reference_step) - sb.degree(pitch))
+            events.append(sb.event(
+                start, note_duration, pitch, voice, rng, segment,
+                surface="counterpoint_line", rhythm_pattern=pattern_name,
+                counterpoint=True, harmony_field_only=True,
+                dynamic_measure=True))
+            recent.append(pitch)
+            prev2, prev = prev, pitch
+            offset = round(offset + float(note_duration), 6)
+    return events
 
 
 def _active_step(events, start, end):
@@ -167,7 +247,8 @@ def _nominal_range_preflight(lead):
     return True, None
 
 
-def _atomic_rescue_accompaniment(lead, plan, bars, bpb, seed, metric, config):
+def _atomic_rescue_accompaniment(lead, plan, bars, bpb, seed, metric, config,
+                                 measure_map=None):
     """Guaranteed-local initializer used only after ordinary attempts fail.
 
     The three mutable voices are chosen jointly on intervals where Lead and
@@ -177,7 +258,7 @@ def _atomic_rescue_accompaniment(lead, plan, bars, bpb, seed, metric, config):
     impossible, the rescue may extend lower voices downward by the configured
     number of octaves; the event is marked explicitly for diagnostics.
     """
-    points = _rescue_time_points(lead, plan, bars, bpb)
+    points = _rescue_time_points(lead, plan, bars, bpb, measure_map)
     output = {"counter": [], "inner": [], "bass": []}
     recent = {voice: [] for voice in output}
     previous = {voice: None for voice in output}
@@ -200,8 +281,11 @@ def _atomic_rescue_accompaniment(lead, plan, bars, bpb, seed, metric, config):
         duration = float(end) - float(start)
         if duration <= 1e-8:
             continue
-        bar = min(bars - 1, max(0, int((float(start) + 1e-8) // float(bpb))))
-        offset = float(start) - bar * float(bpb)
+        if measure_map:
+            bar, offset = locate(measure_map, float(start) + 1e-8)
+        else:
+            bar = min(bars - 1, max(0, int((float(start) + 1e-8) // float(bpb))))
+            offset = float(start) - bar * float(bpb)
         segment = hr.harmony_segment_at(plan[bar], offset)
         chord = hr.CHORDS[segment["chord_id"]]
         lead_step = _active_step(lead, start, end)
@@ -260,6 +344,8 @@ def initialize_score_from_ir(frontend, metric, config, spec):
     bpm = float(frontend["tempo_bpm"])
     ts = str(frontend["time_signature"])
     bpb = float(frontend["beats_per_bar"])
+    measure_map = resolved_measure_map(frontend)
+    dynamic_measures = not is_uniform(measure_map)
     plan = copy.deepcopy(frontend["harmony_plan"])
     lead = copy.deepcopy(frontend["lead"])
     frozen_lead = copy.deepcopy(lead)
@@ -307,8 +393,13 @@ def initialize_score_from_ir(frontend, metric, config, spec):
                     rng = random.Random(accompaniment_seed ^ salt)
                     palette = hr.make_rhythm_palette(rng, bpb)
                     attempt_palettes[voice] = hr.rhythm_palette_metadata(palette)
-                    voices[voice] = sb._generate_counterpoint_line(
-                        voice, bars, plan, dict(voices), rng, bpb, palette, reference)
+                    if dynamic_measures:
+                        voices[voice] = _generate_dynamic_counterpoint_line(
+                            voice, plan, measure_map, dict(voices), rng,
+                            palette, reference)
+                    else:
+                        voices[voice] = sb._generate_counterpoint_line(
+                            voice, bars, plan, dict(voices), rng, bpb, palette, reference)
                 palette_metadata = attempt_palettes
                 relaxed_jump_choices = greedy.relaxed_jump_choices
                 expanded_range_choices = greedy.expanded_range_choices
@@ -327,7 +418,8 @@ def initialize_score_from_ir(frontend, metric, config, spec):
                     "Five-part greedy initialization exhausted all attempts; "
                     "four-part atomic rescue cannot be used for a five-part layout")
             rescued, rescue_statistics = _atomic_rescue_accompaniment(
-                lead, plan, bars, bpb, accompaniment_seed, metric, config)
+                lead, plan, bars, bpb, accompaniment_seed, metric, config,
+                measure_map)
             voices = {"lead": copy.deepcopy(lead), **rescued}
             palette_metadata = {
                 **palette_metadata,
@@ -355,6 +447,7 @@ def initialize_score_from_ir(frontend, metric, config, spec):
         "time_signature": ts,
         "beats_per_bar": bpb,
         "bars": bars,
+        "measure_map": copy.deepcopy(measure_map),
         "duration_seconds": float(frontend["duration_seconds"]),
         "configuration": hr.SCALE.to_json_dict(),
         "tuning": {
@@ -439,7 +532,6 @@ def generate_from_ir(frontend, spec):
     metric = annealing.OptimizerMetric(spec, config)
     score = initialize_score_from_ir(frontend, metric, config, spec)
     score["initial_spectral_metrics"] = annealing.final_metrics(score, metric)
-    score["initial_attack_limits"] = annealing.attack_diagnostics(score, metric)
     lead_hash = hashlib.sha256(
         json.dumps(score["voices"]["lead"], sort_keys=True).encode()
     ).hexdigest()
@@ -452,8 +544,9 @@ def generate_from_ir(frontend, spec):
     score["melody_sha256"] = lead_hash
 
     hard, seconds, crossings = sb.validate(score["voices"])
-    jumps = sb.lead_jump_errors(score["voices"])
-    timing = sb.accompaniment_timing_errors(score["voices"], score["beats_per_bar"])
+    jumps = sb.lead_jump_errors(score["voices"]["lead"])
+    timing = sb.accompaniment_timing_errors(
+        score["voices"], score["beats_per_bar"])
     if hard or seconds or crossings or jumps or timing:
         raise RuntimeError("Final generated score failed hard validation")
     score["validation"] = {
@@ -462,18 +555,13 @@ def generate_from_ir(frontend, spec):
         "voice_crossings": len(crossings),
         "lead_jumps_over_configured_limit": len(jumps),
         "accompaniment_timing_errors": len(timing),
-        "degree_cleanup_distances": 0,
-        "step_cleanup_steps": 0,
         "exact_unison_overlaps": 0,
     }
-    score["cleanup"] = {"enabled": False}
-    score["unison_deduplication"] = {"enabled": False}
     score["diagnostics"] = {
         "lead_notes": len(score["voices"]["lead"]),
         "secondary_voice_mode": "counter",
     }
     score["final_spectral_metrics"] = annealing.final_metrics(score, metric)
-    score["simultaneous_attack_cse_limits"] = annealing.attack_diagnostics(score, metric)
     return score
 
 
@@ -495,7 +583,7 @@ def _build_parser():
 def cli(argv=None):
     args = _build_parser().parse_args(argv)
     # main owns runtime configuration and final reporting; this module owns the
-    # actual IR-to-four-part transformation.
+    # actual IR-to-score transformation.
     import main
     return main.save_score(
         filename=args.output,

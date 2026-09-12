@@ -20,6 +20,7 @@
   "relaxed_jump_extra_cost": 12.0,
   "atomic_rescue": true,
   "atomic_rescue_lower_octaves": 1,
+  "rescue_beam_width": 384,
   "expanded_range_extra_cost": 20.0
 }
 ```

@@ -111,20 +111,6 @@ def _fresh_rhythms(cells, target, limit, rng, dense_min_notes=5,
         chosen = rng.choices(available, weights=weights, k=1)[0]
         result.append(chosen)
         available.remove(chosen)
-    # Density is a candidate-bank property: it only ensures that the beam gets
-    # to compare a dense option; it never forces the final result to be dense.
-    dense = [row for row in cells if len(row) >= int(dense_min_notes)]
-    dense_probability = max(0.0, min(1.0, float(dense_candidate_probability)))
-    if dense and dense_probability > 0.0 and rng.random() < dense_probability:
-        missing = [row for row in dense if row not in result]
-        if missing:
-            weights = [math.exp(-1.35 * abs(len(row) - float(target))) for row in missing]
-            chosen = rng.choices(missing, weights=weights, k=1)[0]
-            if len(result) < count:
-                result.append(chosen)
-            elif not any(len(row) >= int(dense_min_notes) for row in result):
-                replace = min(range(len(result)), key=lambda i: (len(result[i]), i))
-                result[replace] = chosen
     return result
 
 
@@ -261,36 +247,84 @@ def _role_direction(profile, unit):
     return direction
 
 
-def _guide_degrees(section, unit, offsets, profile, bpb):
-    """Continuous section-level register target at each actual onset."""
+def _guide_degrees(section, unit, count, profile):
+    local_bar = max(0, int(unit // 2) - int(section["start_bar"]))
+    curve = section["register_curve"][min(local_bar, len(section["register_curve"]) - 1)]
     degrees = [hr.degree(p) for p in sb.POOLS["lead"]]
     low, high = min(degrees), max(degrees)
     octave = max(1, len(hr.PCS))
-    curve = section["register_curve"]
-    section_start = float(section["start_bar"])
-
-    def curve_at(bar_time):
-        x = max(0.0, min(float(len(curve) - 1), bar_time - section_start))
-        lo = int(math.floor(x))
-        hi = min(len(curve) - 1, lo + 1)
-        return float(curve[lo]) * (1.0 - (x - lo)) + float(curve[hi]) * (x - lo)
-
+    centre = (low + float(curve) * (high - low) +
+              float(profile["register_offset_octaves"]) * octave)
+    if count <= 1:
+        return [max(low, min(high, int(round(centre))))]
+    amplitude = max(1.0, float(profile["guide_amplitude_octaves"]) * octave)
+    contour = profile["contour"]
     guides = []
-    for offset in offsets:
-        bar_time = float(unit) * 0.5 + float(offset) / float(bpb)
-        centre = (low + curve_at(bar_time) * (high - low) +
-                  float(profile["register_offset_octaves"]) * octave)
-        guides.append(max(low, min(high, int(round(centre)))))
+    for i in range(count):
+        t = i / (count - 1)
+        if contour == "rise":
+            shape = t - 0.42
+        elif contour == "fall":
+            shape = 0.42 - t
+        elif contour == "arch":
+            shape = 1.0 - 2.0 * abs(t - 0.5) - 0.35
+        elif contour == "wave":
+            sign = 1.0 if unit % 2 == 0 else -1.0
+            shape = sign * (t - 0.5)
+        else:
+            shape = 0.0
+        guides.append(max(low, min(high, int(round(centre + amplitude * shape)))))
     return guides
 
 
+def _tie_probability(state, harmony, durations, section, unit, role, joint):
+    """Return a context-sensitive chance to continue the preceding Lead note.
+
+    A tie removes the structural attack at a half-bar or bar boundary.  Permit
+    it only when the held pitch is a real chord tone on the incoming side.  If
+    harmony changes, it must be a common tone of both chords.  Formal section
+    openings retain their attack, while reprise/continuation roles may bind a
+    little more often and cadences remain comparatively articulated.
+    """
+    if (not joint["allow_cross_unit_ties"] or unit <= 0 or
+            state["prev"] is None or not durations):
+        return 0.0
+    section_start_unit = int(round(float(section["start_bar"]) * 2.0))
+    if unit == section_start_unit:
+        return 0.0
+    incoming = hr.CHORDS[harmony[0]["chord_id"]]
+    previous = hr.CHORDS.get(state.get("last_chord_id"))
+    pc = int(state["prev"]) % hr.OCT
+    if pc not in incoming.pcs:
+        return 0.0
+    if previous is not None and previous.id != incoming.id and pc not in previous.pcs:
+        return 0.0
+    tied_duration = float(state.get("last_note_duration", 0.0)) + float(durations[0])
+    if tied_duration > float(joint["max_tied_duration_beats"]) + EPS:
+        return 0.0
+    bar_boundary = unit % 2 == 0
+    probability = float(joint[
+        "cross_bar_tie_probability" if bar_boundary
+        else "cross_half_bar_tie_probability"])
+    if previous is not None and previous.id != incoming.id:
+        probability *= 1.25  # common-tone harmonic connection
+    else:
+        probability *= 0.80  # avoid merely erasing repeated-harmony attacks
+    if role in {"reprise", "continuation"}:
+        probability *= 1.20
+    elif role == "cadence":
+        probability *= 0.55
+    return max(0.0, min(1.0, probability))
+
+
 def _fresh_pitches(state, harmony, durations, section, unit, role_profile, rng,
-                   motif_queue, allow_ties=False, tie_probability=0.0):
+                   motif_queue, role, joint):
     prev, prev2 = state["prev"], state["prev2"]
     recent = list(state["recent"])
-    offsets = _onsets(durations)
-    guides = _guide_degrees(section, unit, offsets, role_profile, state["bpb"])
+    guides = _guide_degrees(section, unit, len(durations), role_profile)
     direction = _role_direction(role_profile, unit)
+    tie_first = rng.random() < _tie_probability(
+        state, harmony, durations, section, unit, role, joint)
     pitches, attacks = [], []
     offset = 0.0
     for index, duration in enumerate(durations):
@@ -298,13 +332,11 @@ def _fresh_pitches(state, harmony, durations, section, unit, role_profile, rng,
         chord = hr.CHORDS[segment["chord_id"]]
         strong = hr.is_strong_beat((unit % 2) * (state["bpb"] / 2.0) + offset,
                                    state["bpb"])
-        continuation = (bool(allow_ties) and index == 0 and prev is not None and
-                        rng.random() < float(tie_probability))
-        motif_index = int(state.get("motif_cursor", 0)) + sum(attacks)
+        continuation = index == 0 and tie_first
         if continuation:
             candidate = prev
-        elif motif_queue and motif_index < len(motif_queue):
-            candidate = sb._fit_motif_pitch(motif_queue[motif_index], prev, guides[index])
+        elif motif_queue and unit < 4 and index < len(motif_queue):
+            candidate = sb._fit_motif_pitch(motif_queue[index], prev, guides[index])
         else:
             candidate = sb.choose_lead_pitch(
                 prev, prev2, chord, strong, recent, rng, guides[index],
@@ -322,71 +354,80 @@ def _fresh_pitches(state, harmony, durations, section, unit, role_profile, rng,
             prev2, prev = prev, candidate
             recent.append(candidate)
         offset += float(duration)
-    return (pitches, attacks,
-            min(len(motif_queue), int(state.get("motif_cursor", 0)) + sum(attacks)))
+    return pitches, attacks
 
 
-def _unit_cost(state, harmony, durations, pitches, attacks, section, unit, role_profile, weights):
+def _cadence_pitches(state, pitches, unit):
+    """Prefer a reachable tonic ending, touching at most the final two notes.
+
+    Called for fresh and copied material alike; timing is never changed.
+    External fixed-melody/retune inputs do not use this generation path.
+    """
+    from annealing_config import resolve_annealing
+    from harmonic_realization import tonic_pc
+    config = resolve_annealing(hr.SCALE.style.get('annealing',{}))['harmonic_realization']
+    phrase_units = int(state.get('phrase_units',16))
+    if (not config['enabled'] or not config['melody_tonic_cadence'] or
+            (unit+1) % phrase_units != 0 or not pitches):
+        return list(pitches)
+    tonic = tonic_pc(hr)
+    targets = sorted((p for p in sb.POOLS['lead'] if p % hr.OCT == tonic),
+                     key=lambda p:abs(p-pitches[-1]))
+    previous = pitches[-2] if len(pitches)>1 else state['prev']
+    for target in targets:
+        if sb.lead_jump_ok(previous,target):
+            return list(pitches[:-1])+[target]
+    if len(pitches)>1:
+        previous = pitches[-3] if len(pitches)>2 else state['prev']
+        for bridge in sorted(sb.POOLS['lead'],key=lambda p:abs(p-pitches[-2])):
+            for target in targets:
+                if sb.lead_jump_ok(previous,bridge) and sb.lead_jump_ok(bridge,target):
+                    return list(pitches[:-2])+[bridge,target]
+    # Never violate a hard range/jump condition merely to force closure.
+    return list(pitches)
+
+
+def _unit_cost(state, harmony, durations, pitches, attacks, section, unit,
+               role_profile, weights):
     bpb = state["bpb"]
     half = bpb / 2.0
     recent = list(state["recent"])
     prev = state["prev"]
-    offsets = _onsets(durations)
-    guide = _guide_degrees(section, unit, offsets, role_profile, bpb)
+    guide = _guide_degrees(section, unit, max(1, len(pitches)), role_profile)
+    register = sum(abs(hr.degree(p) - g) for p, g in zip(pitches, guide)) / max(1, len(pitches))
+    degree_span = max(1, max(hr.degree(p) for p in sb.POOLS["lead"]) -
+                      min(hr.degree(p) for p in sb.POOLS["lead"]))
+    register /= degree_span
     target = (float(section["density_curve"][min(int((unit / 2) % 8),
                                                     len(section["density_curve"]) - 1)]) *
               float(role_profile["density_multiplier"]) *
               float(state["base_events_per_bar"]) / 2.0)
-    density = abs(sum(bool(x) for x in attacks) - target) / max(1.0, target)
-    register = background = strong_cost = 0.0
-    voice = 0.0
-    register_duration = background_duration = 0.0
-    strong_count = voice_count = 0
+    density = abs(sum(attacks) - target) / max(1.0, target)
+    voice = background = strong_cost = 0.0
+    offset = 0.0
     old = prev
-    old2 = state["prev2"]
-    for offset, duration, pitch, attack, guide_degree in zip(offsets, durations, pitches, attacks, guide):
+    attack_count = 0
+    for duration, pitch, attack in zip(durations, pitches, attacks):
         segment = _unit_chord(harmony, offset)
         chord = hr.CHORDS[segment["chord_id"]]
         beat = (unit % 2) * half + offset
         strong = hr.is_strong_beat(beat, bpb)
-        components = sb.lead_candidate_cost_components(
-            old, old2, chord, strong, recent, pitch, guide_degree,
-            _role_direction(role_profile, unit),
-            unit % 2 == 1 and float(role_profile["cadence_root_weight"]) > 0,
-            beat, duration, bpb)
-        if components is None:
-            return math.inf, {key: math.inf for key in weights}
-        # The pitch-selection and beam layers now share the same deterministic
-        # primitives.  This layer only changes their temporal aggregation.
-        register += float(duration) * (components["guide"] + components["register"])
-        register_duration += float(duration)
         if attack:
-            voice += sum(components[key] for key in (
-                "interval", "leap_recovery", "landing", "sixteenth_flow", "direction",
-                "ngram", "pc_frequency", "motion_diversity", "boundary"))
-            voice_count += 1
-        # A sustained note can cross a harmony segment.  Integrate the field
-        # over the actual overlap instead of charging one value per onset.
-        note_end = offset + float(duration)
-        for background_segment in harmony:
-            start = max(offset, float(background_segment["offset"]))
-            end = min(note_end, float(background_segment["offset"]) +
-                      float(background_segment["duration"]))
-            if end > start + EPS:
-                bg_chord = hr.CHORDS[background_segment["chord_id"]]
-                overlap = end - start
-                background += overlap * sb.cse_rt.lead_chord_field_cost(bg_chord, pitch, strong)
-                background_duration += overlap
+            if old is not None:
+                voice += sb._lead_interval_cost(abs(hr.degree(pitch) - hr.degree(old)))
+            voice += sb._lead_motion_diversity_cost(recent, pitch, strong, duration)
+            voice += sb._lead_ngram_prior_cost(recent, pitch)
+            attack_count += 1
+        background += sb.cse_rt.lead_chord_field_cost(chord, pitch, strong)
         if attack and strong and pitch % hr.OCT not in chord.pcs:
             strong_cost += 1.0
-            strong_count += 1
         if attack:
             recent.append(pitch)
-            old2, old = old, pitch
-    register /= max(EPS, register_duration)
-    voice /= max(1, voice_count)
-    background /= max(EPS, background_duration)
-    strong_cost /= max(1, strong_count)
+            old = pitch
+        offset += float(duration)
+    voice /= max(1, attack_count)
+    background /= max(1, len(pitches))
+    strong_cost /= max(1, attack_count)
     transition = 0.0
     last = hr.CHORDS.get(state["last_chord_id"])
     for segment in harmony:
@@ -398,9 +439,13 @@ def _unit_cost(state, harmony, durations, pitches, attacks, section, unit, role_
     role_cadence_weight = float(role_profile["cadence_root_weight"])
     if unit % 2 == 1 and role_cadence_weight > 0:
         last_chord = hr.CHORDS[harmony[-1]["chord_id"]]
-        if not pitches or pitches[-1] % hr.OCT != last_chord.foot % hr.OCT:
+        from harmonic_realization import tonic_pc, musical_root
+        phrase_units = int(state.get('phrase_units',16))
+        target = (tonic_pc(hr) if (unit+1) % phrase_units == 0 else
+                  musical_root(hr,harmony[-1]))
+        if not pitches or pitches[-1] % hr.OCT != target:
             cadence += role_cadence_weight
-    if unit % 16 == 15:
+    if (unit+1) % int(state.get('phrase_units',16)) == 0:
         cadence += max(0, len(pitches) - 2) * .35
     components = {
         "register": register, "density": density, "voice_leading": voice,
@@ -415,7 +460,8 @@ def _material_events(unit, material, rng, bpb, action, role, leaf):
     start = unit * half
     offset = 0.0
     output = []
-    for duration, pitch, attack in zip(material["rhythm"], material["pitches"], material["attacks"]):
+    for duration, pitch, attack in zip(
+            material["rhythm"], material["pitches"], material["attacks"]):
         segment = _unit_chord(material["harmony"], offset)
         beat_in_bar = (unit % 2) * half + offset
         output.append(sb.event(
@@ -431,63 +477,38 @@ def _material_events(unit, material, rng, bpb, action, role, leaf):
             melodyplan_leaf=leaf["id"],
             bar_role=role,
             lead_continuation=not bool(attack),
+            continuation_boundary=(
+                "bar" if not attack and unit % 2 == 0 else
+                "half_bar" if not attack else None),
         ))
         offset += float(duration)
     return output
 
 
 def _merge_lead_continuations(events):
-    """Collapse internal continue cells into one cross-unit Lead event."""
+    """Represent a cross-boundary continuation as one sustained IR event."""
     merged = []
     for event in sorted(events, key=lambda row: float(row["start_beat"])):
         continuation = bool(event.pop("lead_continuation", False))
-        if continuation:
-            if not merged:
-                raise sb.GenerationRejected("Lead continuation has no preceding attack")
-            previous = merged[-1]
-            adjacent = math.isclose(float(previous["start_beat"]) + float(previous["duration_beats"]),
-                                    float(event["start_beat"]), abs_tol=EPS)
-            if not adjacent or int(previous["step"]) != int(event["step"]):
-                raise sb.GenerationRejected("Lead continuation does not match its preceding attack")
-            previous["duration_beats"] = round(
-                float(previous["duration_beats"]) + float(event["duration_beats"]), 6)
-            previous["tie_continuations"] = int(previous.get("tie_continuations", 0)) + 1
+        boundary = event.pop("continuation_boundary", None)
+        if not continuation:
+            merged.append(event)
             continue
-        merged.append(event)
+        if not merged:
+            raise sb.GenerationRejected("Lead continuation has no preceding attack")
+        previous = merged[-1]
+        adjacent = math.isclose(
+            float(previous["start_beat"]) + float(previous["duration_beats"]),
+            float(event["start_beat"]), abs_tol=EPS)
+        if not adjacent or int(previous["step"]) != int(event["step"]):
+            raise sb.GenerationRejected(
+                "Lead continuation does not match its preceding attack")
+        previous["duration_beats"] = round(
+            float(previous["duration_beats"]) + float(event["duration_beats"]), 6)
+        previous["tie_continuations"] = int(previous.get("tie_continuations", 0)) + 1
+        key = "cross_bar_ties" if boundary == "bar" else "cross_half_bar_ties"
+        previous[key] = int(previous.get(key, 0)) + 1
     return merged
-
-
-def _apply_phrase_rests(events, plan, bpb, joint, rng):
-    """Create optional breath gaps by shortening a phrase-final held note.
-
-    Rests are deliberately restricted to answer/liquidation boundaries.  They
-    are represented by event gaps in the IR, never by a fake pitch event.
-    """
-    if not bool(joint["allow_phrase_rests"]):
-        return events
-    boundaries = []
-    for section in plan["sections"]:
-        for local_bar, role in enumerate(section["bar_roles"]):
-            if role in {"theme_answer", "liquidation"}:
-                boundaries.append((float(section["start_bar"]) + local_bar + 1.0) * float(bpb))
-    output = copy.deepcopy(events)
-    allowed = tuple(sorted(float(x) for x in joint["phrase_rest_durations"] if float(x) > 0.0))
-    for boundary in boundaries:
-        if rng.random() >= float(joint["phrase_rest_probability"]):
-            continue
-        prior = next((event for event in reversed(output)
-                      if math.isclose(float(event["start_beat"]) + float(event["duration_beats"]),
-                                        boundary, abs_tol=EPS)), None)
-        if prior is None:
-            continue
-        candidates = [duration for duration in allowed
-                      if float(prior["duration_beats"]) - duration >= 0.125 - EPS]
-        if not candidates:
-            continue
-        duration = rng.choice(candidates)
-        prior["duration_beats"] = round(float(prior["duration_beats"]) - duration, 6)
-        prior["phrase_rest_after"] = round(duration, 6)
-    return output
 
 
 def _merge_segments(segments):
@@ -518,12 +539,15 @@ def _assemble_harmony(materials, banks, plan, bars, bpb, rng):
         segments = _merge_segments(segments)
         # Every eight-bar phrase retains the original harmony generator's
         # mandatory closing anchor even after mixed-layer inheritance.
-        if bar % 8 == 7 and segments[-1]["chord_id"] not in hr.ANCHOR_CHORD_IDS:
+        phrase_bars = int(plan["section_size_bars"])
+        if (not plan.get("manual_progression") and
+                (bar+1) % phrase_bars == 0 and
+                segments[-1]["chord_id"] not in hr.ANCHOR_CHORD_IDS):
             segments[-1] = hr._force_anchor_segment(segments[-1], rng)
         base["bar"] = bar
         base["chord_segments"] = segments
         base["chords_in_bar"] = len(segments)
-        base["melodyplan_section"] = plan["sections"][bar // 8]["id"]
+        base["melodyplan_section"] = plan["sections"][bar // phrase_bars]["id"]
         hr._refresh_primary_from_first_segment(base)
         rows.append(base)
     return rows
@@ -540,30 +564,46 @@ def generate_frontend_ir(seed=20260811, bars=48, bpm=96.0, motif_degrees=None,
     ts, bpb = hr.normalize_time_signature(time_signature)
     cfg = resolve_melody_plan(spec.style.get("melody_plan"))
     if not cfg["enabled"]:
-        from frontend_generate import generate_frontend_ir as generate_legacy_frontend
-        return generate_legacy_frontend(
-            seed, bars, bpm, motif_degrees, ts, allow_sixteenth, spec)
-    plan = generate_plan(seed, bars, bpb, cfg)
+        raise ValueError("melody_plan.enabled must be true")
+    progression = spec.resolved_chord_progression()
+    progression_bars = (len(progression.get("codes") or progression.get("degrees")) *
+                        int(progression["bars_per_chord"])) if progression else None
+    natural_mode = (hr.NATURAL_SCALE_MODE and progression is None and
+                    hr._natural_progression_config()['enabled'])
+    # Choose a complete route once: local CSE comparisons must not cherry-pick
+    # major chords from different routes and destroy ii-V-I or introduce D-S.
+    natural_bank = (hr.harmony_plan(bars, random.Random(int(seed)), bpb)
+                    if natural_mode else None)
+    planned_harmony = ([tuple((s['chord_id'],s['offset'],s['duration'])
+                             for s in _clip_unit(natural_bank[u//2],u%2,bpb))
+                        for u in range(bars*2)] if natural_mode else None)
+    plan = generate_plan(seed, bars, bpb, cfg,
+                         manual_progression_bars=progression_bars,
+                         planned_harmony=planned_harmony)
 
     palette_rng = random.Random(int(seed) ^ 0x52485954484D)
     palette = hr.make_rhythm_palette(palette_rng, bpb)
     cells = _half_rhythm_cells(palette, bpb, allow_sixteenth)
     harmony_count = cfg["joint_generation"]["harmony_candidates"]
-    banks = [hr.harmony_plan(bars, random.Random(int(seed) + 1000003 * i), bpb)
-             for i in range(harmony_count)]
+    banks = ([natural_bank] if natural_mode else
+             [hr.harmony_plan(bars, random.Random(int(seed) + 1000003 * i), bpb)
+              for i in range(harmony_count)])
     if spec.resolved_chord_progression() is not None:
         banks = [banks[0]]
 
     initial = {
         "cost": 0.0, "materials": [], "lead": [], "recent": [],
         "prev": None, "prev2": None, "last_chord_id": None, "bpb": bpb,
+        "last_note_duration": 0.0,
         "base_events_per_bar": cfg["joint_generation"]["base_events_per_bar"],
-        "octave_reprise_decisions": {}, "motif_cursor": 0,
+        "phrase_units": int(plan["section_size_bars"])*2,
+        "octave_reprise_decisions": {},
         "components": {key: 0.0 for key in cfg["joint_generation"]["weights"]},
     }
     beam = [initial]
     motif_queue = sb.user_motif_steps(motif_degrees)
-    section_by_unit = [plan["sections"][min(len(plan["sections"]) - 1, u // 16)]
+    section_by_unit = [plan["sections"][min(len(plan["sections"]) - 1,
+                                            u // (int(plan["section_size_bars"])*2))]
                        for u in range(bars * 2)]
     joint = cfg["joint_generation"]
     ordered_units = [
@@ -587,7 +627,9 @@ def generate_frontend_ir(seed=20260811, bars=48, bpm=96.0, motif_degrees=None,
             else:
                 harmony_choices = [_clip_unit(bank[unit // 2], unit % 2, bpb)
                                    for bank in banks]
-            density = section["density_curve"][min(7, (unit // 2) % 8)]
+            local_bar = unit//2-int(section["start_bar"])
+            density = section["density_curve"][min(len(section["density_curve"])-1,
+                                                    local_bar)]
             target = (float(joint["base_events_per_bar"]) * float(density) *
                       float(role_profile["density_multiplier"]) / 2.0)
             if "R" in layers:
@@ -618,13 +660,15 @@ def generate_frontend_ir(seed=20260811, bars=48, bpm=96.0, motif_degrees=None,
                             octave_decisions = dict(octave_decisions)
                             octave_decisions[segment_id] = resolved_octave_shift
                         copied = _copy_pitches(source["pitches"], resolved_octave_shift)
-                        copied_attacks = list(source.get("attacks", (True,) * len(copied)))
-                        # A copied continuation can only remain a tie when it
-                        # still joins the preceding realised pitch/register.
-                        if copied_attacks and not copied_attacks[0] and (
-                                state["prev"] is None or copied[0] != state["prev"]):
-                            copied_attacks[0] = True
-                        pitch_choices = [(copied, copied_attacks, state["motif_cursor"])]
+                        copied_attacks = list(source.get(
+                            "attacks", (True,) * len(copied)))
+                        if copied_attacks and not copied_attacks[0]:
+                            eligible = _tie_probability(
+                                state, harmony, rhythm, section, unit, role, joint) > 0.0
+                            if (not eligible or state["prev"] is None or
+                                    copied[0] != state["prev"]):
+                                copied_attacks[0] = True
+                        pitch_choices = [(copied, copied_attacks)]
                     else:
                         octave_decisions = state["octave_reprise_decisions"]
                         pitch_choices = []
@@ -634,37 +678,48 @@ def generate_frontend_ir(seed=20260811, bars=48, bpm=96.0, motif_degrees=None,
                                                  hi * 257 + ri * 31 + mi))
                             pitch_choices.append(_fresh_pitches(
                                 state, harmony, rhythm, section, unit, role_profile,
-                                crng, motif_queue,
-                                bool(joint["allow_cross_unit_ties"]),
-                                float(joint["cross_unit_tie_probability"])))
-                    for mi, (pitches, attacks, motif_cursor) in enumerate(pitch_choices):
+                                crng, motif_queue, role, joint))
+                    for mi, (pitches, attacks) in enumerate(pitch_choices):
+                        pitches = _cadence_pitches(state,pitches,unit)
+                        if (attacks and not attacks[0] and
+                                pitches[0] != state["prev"]):
+                            attacks[0] = True
                         if len(pitches) != len(rhythm):
                             continue
                         crng = random.Random(int(seed) ^ (unit * 15485863 +
                                                          state_index * 8191 + hi * 509 +
                                                          ri * 67 + mi))
                         increment, components = _unit_cost(
-                            state, harmony, rhythm, pitches, attacks, section, unit, role_profile,
-                            joint["weights"])
+                            state, harmony, rhythm, pitches, attacks, section, unit,
+                            role_profile, joint["weights"])
                         noise = crng.uniform(0.0, float(joint["selection_noise"]))
                         material = {"harmony": copy.deepcopy(harmony),
                                     "rhythm": tuple(rhythm), "pitches": tuple(pitches),
                                     "attacks": tuple(bool(x) for x in attacks)}
-                        actual_pitches = [pitch for pitch, attack in zip(pitches, attacks) if attack]
+                        actual_pitches = [pitch for pitch, attack in
+                                          zip(pitches, attacks) if attack]
+                        if actual_pitches:
+                            last_note_duration = float(rhythm[-1])
+                        else:
+                            last_note_duration = (float(state["last_note_duration"])
+                                                  + sum(map(float, rhythm)))
                         candidate = {
                             "cost": state["cost"] + increment + noise,
                             "materials": state["materials"] + [material],
                             "lead": state["lead"] + _material_events(
                                 unit, material, crng, bpb, action, role, leaf),
                             "recent": (state["recent"] + actual_pitches)[-256:],
-                            "prev": actual_pitches[-1] if actual_pitches else state["prev"],
-                            "prev2": (actual_pitches[-2] if len(actual_pitches) > 1 else
-                                      state["prev"] if actual_pitches else state["prev2"]),
+                            "prev": (actual_pitches[-1] if actual_pitches
+                                     else state["prev"]),
+                            "prev2": (actual_pitches[-2] if len(actual_pitches) > 1
+                                      else state["prev"] if actual_pitches
+                                      else state["prev2"]),
                             "last_chord_id": harmony[-1]["chord_id"],
+                            "last_note_duration": last_note_duration,
                             "bpb": bpb,
                             "base_events_per_bar": state["base_events_per_bar"],
+                            "phrase_units": state["phrase_units"],
                             "octave_reprise_decisions": octave_decisions,
-                            "motif_cursor": motif_cursor,
                             "components": {key: state["components"][key] + components[key]
                                            for key in components},
                         }
@@ -683,19 +738,12 @@ def generate_frontend_ir(seed=20260811, bars=48, bpm=96.0, motif_degrees=None,
     assembly_rng = random.Random(int(seed) ^ 0x415353454D424C59)
     harmony = _assemble_harmony(best["materials"], banks, plan, bars, bpb, assembly_rng)
     best_lead = _merge_lead_continuations(best["lead"])
-    best_lead = _apply_phrase_rests(
-        best_lead, plan, bpb, joint,
-        random.Random(int(seed) ^ 0x425245415448))
     jumps = sb.lead_jump_errors(best_lead)
     if jumps:
         raise sb.GenerationRejected(f"MelodyPlan Lead exceeds jump limit: {jumps[:2]}")
     metadata = {
         "joint_objective": {
             "total": best["cost"], "components": best["components"],
-            "weighted_components": {
-                key: float(joint["weights"][key]) * best["components"][key]
-                for key in best["components"]
-            },
             "beam_width": joint["beam_width"],
             "harmony_candidate_banks": len(banks),
             "octave_reprise_decisions": best["octave_reprise_decisions"],

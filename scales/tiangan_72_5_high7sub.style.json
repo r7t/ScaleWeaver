@@ -1,0 +1,367 @@
+{
+  "format": "CompositionStyle/1",
+  "scale_id": "tiangan_72",
+  "prime_rewards": {
+    "2": 0.0,
+    "3": 0,
+    "5": 0.2,
+    "7": 0.4,
+    "11": 0.0,
+    "13": 0.0,
+    "17": 0.0
+  },
+  "ngram_file": "tiangan_72.ngram.txt",
+  "lead_pc_target_distribution": {
+    "0": 15,
+    "7": 9,
+    "16": 9,
+    "23": 11,
+    "30": 13,
+    "35": 5,
+    "42": 13,
+    "49": 9,
+    "58": 7,
+    "65": 9
+  },
+  "cse_weights": {
+    "CSE_2D_A": 1.0,
+    "CSE_2D_B": 0.0,
+    "CSE_2D_C": 0.0,
+    "LEAD_CHORD_FIELD_CSE_STRONG_WEIGHT": 2.0,
+    "LEAD_CHORD_FIELD_CSE_WEAK_WEIGHT": 1.0,
+    "LEAD_CHORD_FIELD_CSE_CENTER": 0.0
+  },
+  "annealing": {
+    "enabled": true,
+    "worst_subset_cse_weights": {
+      "triad": {
+        "full": 1.0,
+        "worst_dyad": 1.0
+      },
+      "tetrad": {
+        "full": 1.0,
+        "worst_dyad": 1.0,
+        "worst_triad": 1.0
+      },
+      "pentad": {
+        "full": 1.0,
+        "worst_dyad": 1.0,
+        "worst_triad": 1.0,
+        "worst_tetrad": 1.0
+      }
+    },
+    "objective_weights": {
+      "attack": 1.5,
+      "sounding": 1.5,
+      "background": 1.5,
+      "voice_leading": 0.5
+    },
+    "cse_loss_polynomials": {
+      "two_note_attack": {
+        "a4": 0.5,
+        "a3": -2.0,
+        "a2": 4.0,
+        "a1": -4.0,
+        "a0": 1.5
+      },
+      "three_note_attack": {
+        "a4": 0.5,
+        "a3": -2.0,
+        "a2": 4.0,
+        "a1": -4.0,
+        "a0": 1.5
+      },
+      "four_note_attack": {
+        "a4": 0.5,
+        "a3": -2.0,
+        "a2": 4.0,
+        "a1": -4.0,
+        "a0": 1.5
+      },
+      "sounding": {
+        "a4": 0.5,
+        "a3": -2.0,
+        "a2": 4.0,
+        "a1": -4.0,
+        "a0": 1.5
+      },
+      "five_note_attack": {
+        "a4": 0.5,
+        "a3": -2.0,
+        "a2": 4.0,
+        "a1": -4.0,
+        "a0": 1.5
+      }
+    },
+    "attack": {
+      "cardinality_weights": {
+        "2": 1.0,
+        "3": 1.0,
+        "4": 1.0,
+        "5": 1.0
+      }
+    },
+    "background_voice_weights": {
+      "counter": 0.58,
+      "inner": 0.72,
+      "bass": 0.62,
+      "inner2": 0.65
+    },
+    "voice_leading": {
+      "motion_weight": 1.0,
+      "repeat_cost": 2.0,
+      "large_leap_cost": 0.1,
+      "ngram_weights": {
+        "counter": 0.82,
+        "inner": 0.72,
+        "bass": 0.62,
+        "inner2": 0.77
+      },
+      "bass_ngram_weight": 1.0,
+      "register_weights": {
+        "counter": 0.02,
+        "inner": 0.024,
+        "bass": 0.02,
+        "inner2": 0.022
+      }
+    },
+    "sounding_octave_excess_cost": 1.0,
+    "sounding_octave_family_pair_allowance": {
+      "2": 1,
+      "3": 1,
+      "4": 1,
+      "5": 2
+    },
+    "initialization": {
+      "max_attempts": 24,
+      "seed_stride": 1000003,
+      "relax_melodic_jumps": true,
+      "relaxed_jump_extra_cost": 12.0,
+      "atomic_rescue": true,
+      "atomic_rescue_lower_octaves": 1,
+      "expanded_range_extra_cost": 20.0,
+      "rescue_beam_width": 384
+    },
+    "search": {
+      "steps": 750000,
+      "start_temperature": 0.005,
+      "end_temperature": 5e-05,
+      "move_size_weights": {
+        "1": 0.5,
+        "2": 0.3,
+        "3": 0.2
+      },
+      "local_probability": 0.8,
+      "local_radius_degrees": 3,
+      "quench_sweeps": 2,
+      "progress_every": 25000
+    },
+    "prime_salience": {
+      "weight_5": 0.0,
+      "weight_7": 0.0,
+      "joint_weight": 0.0,
+      "interval_rewards": {
+        "3/2": 0.0,
+        "4/3": 0.0,
+        "5/4": 0.0,
+        "6/5": 0.0,
+        "7/6": 0.1,
+        "8/7": 0.4,
+        "8/5": 0.0,
+        "5/3": 0.0,
+        "7/5": 0.0,
+        "7/4": 0.1,
+        "10/7": 0.0,
+        "12/7": 0.4
+      },
+      "attack_weight": 1.0,
+      "sounding_weight": 1.0,
+      "tolerance_cents": 12.0,
+      "fusion_discount": 0.65,
+      "intervening_voice_discount": 0.35,
+      "compound_decay_per_octave": 0.65,
+      "presence_scale": 0.0
+    }
+  },
+  "melody_plan": {
+    "enabled": true,
+    "unit_bars": 0.5,
+    "leaf_span_weights": {
+      "0.5": 0.25,
+      "1": 0.45,
+      "2": 0.3
+    },
+    "fresh_root_count_weights": {
+      "2": 0.65,
+      "3": 0.3,
+      "4": 0.05
+    },
+    "cross_phrase_form_weights": {
+      "AABBAB": 0.34,
+      "AAB_CBC": 0.27,
+      "ABCABC": 0.21,
+      "ABACBC": 0.14,
+      "ABCDAC": 0.04
+    },
+    "macro_pattern_weights": {
+      "uniform": 0.12,
+      "motif_over_harmony": 0.32,
+      "rhythm_identity": 0.18,
+      "reharmonized_reprise": 0.26,
+      "fresh_tail": 0.12
+    },
+    "relation_mode_weights": {
+      "H": 0.05,
+      "R": 0.07,
+      "RH": 0.1,
+      "MR": 0.3,
+      "MRH": 0.48
+    },
+    "copy_length_weights": {
+      "0.5": 0.03,
+      "1": 0.06,
+      "1.5": 0.08,
+      "2": 0.2,
+      "2.5": 0.08,
+      "3": 0.1,
+      "3.5": 0.07,
+      "4": 0.2,
+      "5": 0.05,
+      "6": 0.06,
+      "7": 0.02,
+      "8": 0.05
+    },
+    "rhythm_exact_probability": 0.75,
+    "octave_shift_weights": {
+      "-1": 0.12,
+      "0": 0.76,
+      "1": 0.12
+    },
+    "internal_recurrence": {
+      "eight_bar_probability": 0.92,
+      "four_bar_probability": 0.32,
+      "two_bar_probability": 0.48
+    },
+    "four_bar_relation_mode_weights": {
+      "R": 0.72,
+      "MR": 0.2,
+      "H": 0.05,
+      "RH": 0.03
+    },
+    "bar_role_profiles": {
+      "theme_statement": {
+        "contour": "rise",
+        "direction": 1,
+        "guide_amplitude_octaves": 0.16,
+        "register_offset_octaves": -0.03,
+        "density_multiplier": 1.0,
+        "cadence_root_weight": 0.0
+      },
+      "theme_answer": {
+        "contour": "fall",
+        "direction": -1,
+        "guide_amplitude_octaves": 0.18,
+        "register_offset_octaves": 0.02,
+        "density_multiplier": 0.96,
+        "cadence_root_weight": 0.18
+      },
+      "development": {
+        "contour": "wave",
+        "direction": 1,
+        "guide_amplitude_octaves": 0.24,
+        "register_offset_octaves": 0.04,
+        "density_multiplier": 1.08,
+        "cadence_root_weight": 0.0
+      },
+      "climax": {
+        "contour": "rise",
+        "direction": 1,
+        "guide_amplitude_octaves": 0.26,
+        "register_offset_octaves": 0.1,
+        "density_multiplier": 1.12,
+        "cadence_root_weight": 0.0
+      },
+      "reprise": {
+        "contour": "arch",
+        "direction": 0,
+        "guide_amplitude_octaves": 0.16,
+        "register_offset_octaves": 0.0,
+        "density_multiplier": 0.98,
+        "cadence_root_weight": 0.08
+      },
+      "continuation": {
+        "contour": "wave",
+        "direction": -1,
+        "guide_amplitude_octaves": 0.18,
+        "register_offset_octaves": -0.02,
+        "density_multiplier": 0.92,
+        "cadence_root_weight": 0.1
+      },
+      "liquidation": {
+        "contour": "fall",
+        "direction": -1,
+        "guide_amplitude_octaves": 0.14,
+        "register_offset_octaves": -0.06,
+        "density_multiplier": 0.72,
+        "cadence_root_weight": 0.28
+      },
+      "cadence": {
+        "contour": "fall",
+        "direction": -1,
+        "guide_amplitude_octaves": 0.12,
+        "register_offset_octaves": -0.09,
+        "density_multiplier": 0.54,
+        "cadence_root_weight": 1.0
+      }
+    },
+    "joint_generation": {
+      "beam_width": 8,
+      "harmony_candidates": 3,
+      "rhythm_candidates": 3,
+      "melody_candidates": 2,
+      "base_events_per_bar": 8.0,
+      "dense_half_min_notes": 5,
+      "dense_half_candidate_probability": 0.0,
+      "fancy_frequency_multiplier": 1.0,
+      "syncopated_frequency_multiplier": 1.0,
+      "straight_flow_frequency_multiplier": 1.0,
+      "selection_noise": 0.035,
+      "weights": {
+        "register": 0.34,
+        "density": 0.2,
+        "voice_leading": 0.72,
+        "background": 1.0,
+        "strong_beat_chord_tone": 0.42,
+        "harmony_transition": 0.16,
+        "cadence": 0.55
+      }
+    }
+  },
+  "voice_pc_rewards": {
+    "bass": {
+      "0": -0.125,
+      "7": -0.125,
+      "23": 0.125,
+      "42": 0.125,
+      "49": 0.125,
+      "65": 0.125
+    },
+    "inner": {
+      "0": -0.25,
+      "7": -0.25,
+      "16": 0.25,
+      "58": 0.25,
+      "42": 0.125,
+      "23": 0.125
+    },
+    "counter": {
+      "7": 0.1,
+      "35": 0.2
+    },
+    "inner2": {
+      "16": 0.2,
+      "58": 0.2,
+      "35": 0.2
+    }
+  }
+}

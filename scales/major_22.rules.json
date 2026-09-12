@@ -5,7 +5,6 @@
   "cleanup": {
     "degree_distances": [],
     "step_distances": [],
-    "passes": 8,
     "soft_penalty": 0.72
   },
   "melody": {
@@ -77,18 +76,6 @@
         16,
         20
       ]
-    },
-    "chord_progression": {
-      "degrees": [
-        4,
-        5,
-        3,
-        6,
-        2,
-        5,
-        1
-      ],
-      "bars_per_chord": 1
     }
   },
   "metadata": {

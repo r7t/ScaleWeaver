@@ -119,10 +119,9 @@ DEFAULTS = {
         "syncopated_frequency_multiplier": 0.35,
         "straight_flow_frequency_multiplier": 1.2,
         "allow_cross_unit_ties": True,
-        "cross_unit_tie_probability": 0.16,
-        "allow_phrase_rests": False,
-        "phrase_rest_probability": 0.18,
-        "phrase_rest_durations": [0.25, 0.5, 1.0],
+        "cross_half_bar_tie_probability": 0.18,
+        "cross_bar_tie_probability": 0.12,
+        "max_tied_duration_beats": 3.0,
         "selection_noise": 0.035,
         "weights": {
             "register": 0.34,
@@ -155,32 +154,6 @@ BAR_ROLES = (
     "theme_statement", "theme_answer", "development", "climax",
     "reprise", "continuation", "liquidation", "cadence",
 )
-
-
-def _bar_roles_for_curve(curve):
-    """Assign formal roles around the actual high point of a register curve."""
-    count = len(curve)
-    if not count:
-        return [], 0
-    climax = max(range(count), key=lambda i: (float(curve[i]), -i))
-    roles = ["development"] * count
-    roles[0] = "theme_statement"
-    if count > 1:
-        roles[1] = "theme_answer"
-    if count > 2:
-        roles[-2] = "liquidation"
-    if count > 1:
-        roles[-1] = "cadence"
-    # The role is deliberately tied to the profile's real maximum, including
-    # profiles such as ``descending_answer`` that begin at their high point.
-    # The explicit field retains that fact even when a caller uses a different
-    # role vocabulary later.
-    roles[climax] = "climax"
-    if climax + 1 < count - 2:
-        roles[climax + 1] = "reprise"
-    if climax + 2 < count - 2:
-        roles[climax + 2] = "continuation"
-    return roles, climax
 
 
 def _merge(default, supplied, path="melody_plan"):
@@ -248,14 +221,14 @@ def resolve_melody_plan(supplied=None):
         raise ValueError("melody_plan.joint_generation.base_events_per_bar must be positive")
     if not 0 <= float(joint["dense_half_candidate_probability"]) <= 1:
         raise ValueError("melody_plan.joint_generation.dense_half_candidate_probability must be in 0..1")
-    for key in ("cross_unit_tie_probability", "phrase_rest_probability"):
+    if not isinstance(joint["allow_cross_unit_ties"], bool):
+        raise ValueError("melody_plan.joint_generation.allow_cross_unit_ties must be boolean")
+    for key in ("cross_half_bar_tie_probability", "cross_bar_tie_probability"):
         if not 0 <= float(joint[key]) <= 1:
             raise ValueError(f"melody_plan.joint_generation.{key} must be in 0..1")
-    if not isinstance(joint["allow_cross_unit_ties"], bool) or not isinstance(joint["allow_phrase_rests"], bool):
-        raise ValueError("melody_plan joint tie/rest switches must be boolean")
-    if (not isinstance(joint["phrase_rest_durations"], list) or not joint["phrase_rest_durations"] or
-            any(not math.isfinite(float(x)) or float(x) <= 0 for x in joint["phrase_rest_durations"])):
-        raise ValueError("melody_plan.joint_generation.phrase_rest_durations must be positive")
+    if (not math.isfinite(float(joint["max_tied_duration_beats"])) or
+            float(joint["max_tied_duration_beats"]) <= 0):
+        raise ValueError("melody_plan.joint_generation.max_tied_duration_beats must be positive")
     for key in ("fancy_frequency_multiplier", "syncopated_frequency_multiplier"):
         if not 0 <= float(joint[key]) <= 1:
             raise ValueError(f"melody_plan.joint_generation.{key} must be in 0..1")
@@ -303,6 +276,55 @@ def _hierarchy_nodes(start, span, section_id, parent=None):
         rows.extend(left)
         rows.extend(right)
     return rows
+
+
+def _manual_phrase_nodes(start, span, section_id):
+    """One phrase parent with direct one-bar children; no binary sub-tree."""
+    parent_id = f"{section_id}:{start:g}+{span:g}"
+    parent = {"id": parent_id, "section_id": section_id,
+              "start_bar": float(start), "span_bars": float(span),
+              "parent": None, "children": []}
+    rows = [parent]
+    for offset in range(int(span)):
+        child_id = f"{section_id}:bar:{start + offset:g}+1"
+        parent["children"].append(child_id)
+        rows.append({"id": child_id, "section_id": section_id,
+                     "start_bar": float(start + offset), "span_bars": 1.0,
+                     "parent": parent_id, "children": []})
+    return rows
+
+
+def _resample_phrase_profile(values, count):
+    """Map the established 8-bar arc onto an arbitrary complete phrase."""
+    if count <= 0:
+        return []
+    if count == 1:
+        return [values[-1]]
+    return [values[int(round(i * (len(values)-1) / (count-1)))]
+            for i in range(count)]
+
+
+def _one_bar_material_leaves(actions, sections):
+    """Manual harmony exposes exactly one direct terminal node per bar."""
+    leaves = []
+    for bar in range(len(actions)//2):
+        start = bar*2
+        rows = actions[start:start+2]
+        same = all((row["mode"],row.get("relation_id")) ==
+                   (rows[0]["mode"],rows[0].get("relation_id")) for row in rows)
+        section = next(s for s in sections
+                       if s["start_bar"] <= bar < s["start_bar"]+s["span_bars"])
+        leaves.append({
+            "id": f"leaf_{bar:03d}", "index": bar,
+            "start_unit": start, "unit_indices": [start,start+1],
+            "start_bar": float(bar), "duration_bars": 1.0, "span_units": 2,
+            "mode": rows[0]["mode"] if same else "MIXED",
+            "source_start_unit": rows[0].get("source_unit") if same else None,
+            "source_start_bar": rows[0].get("source_start_bar") if same else None,
+            "relation_id": rows[0].get("relation_id") if same else None,
+            "bar_roles": [section["bar_roles"][bar-int(section["start_bar"])]],
+        })
+    return leaves
 
 
 def _sample_length(rng, cfg, maximum):
@@ -415,12 +437,21 @@ def _partition_material_leaves(actions, sections, cfg, rng):
     return leaves
 
 
-def generate(seed, bars=48, beats_per_bar=4, supplied=None):
+def generate(seed, bars=48, beats_per_bar=4, supplied=None,
+             manual_progression_bars=None, planned_harmony=None):
     """Generate a deterministic hierarchical plan from one seed."""
     cfg = resolve_melody_plan(supplied)
     bars = int(bars)
     if bars <= 0:
         raise ValueError("bars must be positive")
+    manual_progression = manual_progression_bars is not None
+    phrase_bars = int(manual_progression_bars) if manual_progression else 8
+    if phrase_bars <= 0:
+        raise ValueError("manual progression phrase length must be positive")
+    if manual_progression and bars % phrase_bars:
+        raise ValueError(
+            f"manual progression spans {phrase_bars} bars; --bars={bars} must be "
+            "an exact multiple so every phrase is complete")
     rng = random.Random(int(seed) ^ 0x4D504C414E)
     unit_bars = 0.5
     unit_count = bars * 2
@@ -442,6 +473,14 @@ def generate(seed, bars=48, beats_per_bar=4, supplied=None):
         n = min(n, target_unit - source_unit)
         if n <= 0:
             return None
+        # A preplanned functional progression takes priority over H inheritance.
+        # Keep H only when the whole copied span matches the planned harmony.
+        if planned_harmony is not None and "H" in MODE_LAYERS[mode]:
+            if any(planned_harmony[target_unit+i] != planned_harmony[source_unit+i]
+                   for i in range(n)):
+                mode = _mode_without_harmony(mode)
+                if mode == "FRESH":
+                    return None
         rid = f"rel_{len(relations):03d}"
         fidelity = ("exact" if "M" in MODE_LAYERS[mode] else
                     "exact" if force_exact is True else
@@ -484,7 +523,7 @@ def generate(seed, bars=48, beats_per_bar=4, supplied=None):
         relations.append(row)
         return row
 
-    section_count = (bars + 7) // 8
+    section_count = (bars + phrase_bars - 1) // phrase_bars
     cross_phrase_form, cross_phrase_families = _cross_phrase_families(rng, cfg, section_count)
     if cross_phrase_families is not None:
         root_positions = {i for i,family in enumerate(cross_phrase_families)
@@ -506,8 +545,8 @@ def generate(seed, bars=48, beats_per_bar=4, supplied=None):
     current_family = -1
 
     for section_index in range(section_count):
-        start = section_index * 8
-        span = min(8, bars - start)
+        start = section_index * phrase_bars
+        span = min(phrase_bars, bars - start)
         is_root = section_index in root_positions
         if cross_phrase_families is not None:
             family = cross_phrase_families[section_index]
@@ -526,26 +565,27 @@ def generate(seed, bars=48, beats_per_bar=4, supplied=None):
         family_for_section[section_index] = family
         source_for_section[section_index] = source_index
         profile = rng.choice(tuple(REGISTER_PROFILES))
-        register_curve = list(REGISTER_PROFILES[profile][:span])
-        density_curve = list(DENSITY_PROFILES[profile][:span])
-        bar_roles, climax_bar = _bar_roles_for_curve(register_curve)
         section_id = f"section_{section_index + 1}"
         section = {
             "id": section_id, "index": section_index, "start_bar": start,
             "span_bars": span, "family": family, "fresh_root": is_root,
             "source_section": None if source_index is None else f"section_{source_index + 1}",
             "profile": profile,
-            "register_curve": register_curve,
-            "density_curve": density_curve,
-            "climax_bar": int(climax_bar),
-            "bar_roles": bar_roles,
+            "register_curve": (_resample_phrase_profile(REGISTER_PROFILES[profile],span)
+                               if manual_progression else list(REGISTER_PROFILES[profile][:span])),
+            "density_curve": (_resample_phrase_profile(DENSITY_PROFILES[profile],span)
+                              if manual_progression else list(DENSITY_PROFILES[profile][:span])),
+            "bar_roles": (_resample_phrase_profile(BAR_ROLES,span)
+                          if manual_progression else list(BAR_ROLES[:span])),
         }
         sections.append(section)
-        if span in (1, 2, 4, 8):
+        if manual_progression:
+            nodes.extend(_manual_phrase_nodes(float(start),float(span),section_id))
+        elif span in (1, 2, 4, 8):
             nodes.extend(_hierarchy_nodes(float(start), float(span), section_id))
 
         if not is_root:
-            source_start = source_index * 8
+            source_start = source_index * phrase_bars
             pattern = _weighted_key(rng, cfg["macro_pattern_weights"])
             section["macro_pattern"] = pattern
             if pattern == "uniform":
@@ -578,13 +618,15 @@ def generate(seed, bars=48, beats_per_bar=4, supplied=None):
         # characteristic bars 1-2 -> 5-6 recall is the strongest local edge.
         if is_root and span >= 5 and rng.random() < cfg["internal_recurrence"]["eight_bar_probability"]:
             length = _sample_length(rng, cfg, min(4.0, span - 4.0))
-            add_relation(start + 4, start, length, _sample_mode(rng, cfg),
+            add_relation(start + 4, start, length,
+                         "R" if manual_progression else _sample_mode(rng, cfg),
                          "eight_bar_internal_reprise", only_fresh=True, priority=20)
 
         for block_start in range(start, start + span, 4):
             block_span = min(4, start + span - block_start)
             if block_span >= 4 and rng.random() < cfg["internal_recurrence"]["four_bar_probability"]:
-                mode = _weighted_key(rng, cfg["four_bar_relation_mode_weights"])
+                mode = ("R" if manual_progression else
+                        _weighted_key(rng, cfg["four_bar_relation_mode_weights"]))
                 # At this level pitch identity is motif-sized only: the first
                 # half-bar may recur, while the remainder of the two-bar answer
                 # is newly written.  Rhythm/harmony-only relations may span the
@@ -610,7 +652,8 @@ def generate(seed, bars=48, beats_per_bar=4, supplied=None):
         action = actions[final_unit]
         if "H" in MODE_LAYERS[action["mode"]]:
             source_unit = action["source_unit"]
-            source_is_section_end = source_unit is not None and (source_unit + 1) % 16 == 0
+            source_is_section_end = (source_unit is not None and
+                                     (source_unit + 1) % (phrase_bars*2) == 0)
             if not source_is_section_end:
                 action["mode"] = _mode_without_harmony(action["mode"])
                 action["anchor_harmony_override"] = True
@@ -621,7 +664,8 @@ def generate(seed, bars=48, beats_per_bar=4, supplied=None):
                         "octave_shift": 0, "relation_id": None,
                     })
 
-    leaves = _partition_material_leaves(actions, sections, cfg, rng)
+    leaves = (_one_bar_material_leaves(actions,sections) if manual_progression else
+              _partition_material_leaves(actions, sections, cfg, rng))
 
     plan = {
         "format": FORMAT,
@@ -629,7 +673,8 @@ def generate(seed, bars=48, beats_per_bar=4, supplied=None):
         "bars": bars,
         "beats_per_bar": float(beats_per_bar),
         "unit_bars": unit_bars,
-        "section_size_bars": 8,
+        "section_size_bars": phrase_bars,
+        "manual_progression": manual_progression,
         "fresh_root_sections": sorted(root_positions),
         "fresh_root_count": len(root_positions),
         "material_families": sorted(set(family_for_section.values())),
@@ -653,14 +698,6 @@ def validate(plan):
     leaves = plan.get("leaf_actions")
     if bars <= 0 or not isinstance(actions, list) or len(actions) != bars * 2:
         raise ValueError("MelodyPlan unit_actions must contain two units per bar")
-    for section in plan.get("sections", ()):
-        curve = section.get("register_curve", ())
-        roles = section.get("bar_roles", ())
-        climax = section.get("climax_bar")
-        if len(curve) != len(roles) or not isinstance(climax, int):
-            raise ValueError("MelodyPlan section role/curve metadata is invalid")
-        if curve and not 0 <= climax < len(curve):
-            raise ValueError("MelodyPlan climax_bar lies outside its section")
     for index, action in enumerate(actions):
         mode = action.get("mode")
         if mode not in MODES:
@@ -681,6 +718,8 @@ def validate(plan):
         start = leaf.get("start_unit")
         span = leaf.get("span_units")
         units = leaf.get("unit_indices")
+        if plan.get("manual_progression") and span != 2:
+            raise ValueError("Manual progression material leaves must each span one bar")
         if start != expected_start or span not in (1, 2, 4):
             raise ValueError(f"Invalid material leaf {leaf_index}")
         if (span == 4 and start % 4 != 0) or (span == 2 and start % 2 != 0):

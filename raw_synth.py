@@ -231,7 +231,7 @@ def render_score_raw(
     decay_scale: float = DECAY_SCALE,
     max_partials: int = MAX_PARTIALS,
 ) -> np.ndarray:
-    """The original v7 rendering path, kept behavior-compatible."""
+    """Render the score with the built-in additive synthesis path."""
     bpm = score_bpm(score)
     sec_per_beat = 60.0 / bpm
     voices = score.get("voices", {})
