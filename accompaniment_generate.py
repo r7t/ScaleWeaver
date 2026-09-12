@@ -548,7 +548,15 @@ def generate_from_ir(frontend, spec):
     timing = sb.accompaniment_timing_errors(
         score["voices"], score["beats_per_bar"])
     if hard or seconds or crossings or jumps or timing:
-        raise RuntimeError("Final generated score failed hard validation")
+        details = {
+            "hard_wolves": hard[:3],
+            "step_seconds": seconds[:3],
+            "voice_crossings": crossings[:3],
+            "lead_jumps": jumps[:3],
+            "accompaniment_timing": timing[:3],
+        }
+        failed = {name: sample for name, sample in details.items() if sample}
+        raise RuntimeError(f"Final generated score failed hard validation: {failed}")
     score["validation"] = {
         "hard_wolves": len(hard),
         "step_seconds": len(seconds),

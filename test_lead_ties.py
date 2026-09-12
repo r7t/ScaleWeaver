@@ -79,6 +79,15 @@ class LeadTieTests(unittest.TestCase):
         self.assertEqual(merged[0]["cross_half_bar_ties"], 1)
         self.assertEqual(merged[0]["cross_bar_ties"], 1)
 
+    def test_accompaniment_timing_allows_cross_bar_lead_ties(self):
+        lead = [{"start_beat": 3.5, "duration_beats": 1.0, "step": 0}]
+        bass = [{"start_beat": 3.5, "duration_beats": 1.0, "step": -72}]
+        self.assertEqual(sb.accompaniment_timing_errors({"lead": lead}, 4.0), [])
+        self.assertEqual(
+            sb.accompaniment_timing_errors({"lead": lead, "bass": bass}, 4.0),
+            [("bass", "bar_overrun", 0, 3.5, 1.0)],
+        )
+
     def test_tie_configuration_validation(self):
         with self.assertRaises(ValueError):
             resolve_melody_plan({

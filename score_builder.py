@@ -1062,12 +1062,14 @@ def _generate_counterpoint_line(voice, bars, plan, existing, rng, bpb,
 def accompaniment_timing_errors(voices, bpb):
     """Return accompaniment timing violations."""
     errors=[]; eps=2e-6
-    for voice, xs in voices.items():
+    accompaniment = tuple(voice for voice in voices if voice != 'lead')
+    for voice in accompaniment:
+        xs = voices[voice]
         for e in xs:
             bar=int((e['start_beat']+eps)//bpb)
             if e['start_beat']+e['duration_beats']>(bar+1)*bpb+eps:
                 errors.append((voice,'bar_overrun',bar,e['start_beat'],e['duration_beats']))
-    for voice in ('bass','inner','counter'):
+    for voice in accompaniment:
         by_bar={}
         for e in voices.get(voice,[]): by_bar.setdefault(int((e['start_beat']+eps)//bpb),[]).append(e)
         for bar,xs in by_bar.items():
