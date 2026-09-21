@@ -3,6 +3,8 @@ import copy
 import math
 
 DEFAULTS = {
+    # Soft duration-share ceiling, not a uniform pitch-class quota.
+    'bass_balance': {'weight': 0.0, 'max_share': 0.25},
     'harmonic_realization': {
         'enabled': True, 'weight': 2.0, 'bass_root': 1.5,
         'accompaniment_coverage': 1.0, 'accompaniment_membership': 0.75,
@@ -101,6 +103,8 @@ def resolve_annealing(supplied=None):
             raise ValueError(f'{path} must be finite and nonnegative')
         return raw
     result=merge(DEFAULTS,supplied,'annealing')
+    if not 0 < result['bass_balance']['max_share'] <= 1:
+        raise ValueError('bass_balance.max_share must be in (0,1]')
     if result['prime_salience']['tolerance_cents'] <= 0:
         raise ValueError('prime_salience.tolerance_cents must be positive')
     if result['prime_salience']['fusion_discount'] > 1:

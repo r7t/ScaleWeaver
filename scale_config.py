@@ -226,6 +226,8 @@ class ScaleSpec:
         self.resolved_harmony()
         self.resolved_chord_codes()
         self.resolved_chord_progression()
+        from three_tone_progression import resolve_config
+        resolve_config(self.harmony or {})
 
     def resolved_chord_codes(self) -> dict[str, dict[str, str]]:
         """Return optional one-character aliases for named frozen chords."""

@@ -302,6 +302,13 @@ LEAD_BOUNDARY_FOOT_REWARD = .20
 
 _NGRAM_TABLE = EMPTY_NGRAM_TABLE
 
+def _lead_reference_shape_cost(recent, cand, duration=1.):
+    weight = float(hr.SCALE.style.get('melody_plan', {}).get('joint_generation', {}).get('melodic_shape_weight', 0.))
+    if not weight:
+        return 0.
+    from melody_character import shape_cost
+    return weight * shape_cost(recent, cand, degree, duration)
+
 def _lead_ngram_prior_cost(recent, cand):
     # A 2..5-gram can inspect at most the previous four symbols.  Converting
     # the complete melody prefix here made beam generation accidentally
@@ -695,6 +702,7 @@ def lead_candidate_cost_components(prev, prev2, chord, strong, recent, cand,
     cost += _lead_ngram_prior_cost(recent, cand)
     cost += _lead_pc_frequency_cost(recent, pc, pc_counts)
     cost += _lead_motion_diversity_cost(recent, cand, strong, duration)
+    cost += _lead_reference_shape_cost(recent, cand, duration)
     cost += cse_rt.lead_chord_field_cost(chord, cand, strong)
     if boundary and pc == chord.foot % OCT:
         cost -= LEAD_BOUNDARY_FOOT_REWARD

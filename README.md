@@ -176,9 +176,13 @@ scales/<name>.style.json    CompositionStyle/1
 
 默认五声部配置是 `tiangan_72_5.rules.json`。`tiangan_72_5_norm.style.json` 及 `tiangan_72_5_high*.style.json` 是保留的五声部风格变体。
 
+天干日常风格使用 `annealing.bass_balance` 对超过25%总时值的低音音级施加软惩罚，缓解甲、乙过度集中，保留和声及终止式偏好。该项对 legacy 和 three-tone 都有效，权重设为0可关闭。原因分析、配置和受控比较见 [低音分布均衡](BASS_BALANCE.md)。
+
 ## MelodyPlan 与人工和弦进行
 
 默认前端使用 `MelodyPlan/2`。它先决定材料之间的依赖，再由 `joint_frontend_generate.py` 联合选择和声片段、Lead 节奏与 Lead 音高。48 小节作品可使用多种六段式结构；较短作品按递归的 8、4、2、1 小节层级建立材料关系。
+
+天干日常风格已吸收手写旋律的小范围展开与方向变化偏好，以及隔两小节的节奏呼应关系。保留十六分音符和复杂节奏库，仅轻微简化整体节奏，并提高3+1、降低1+3及略降1+2+1的相对权重。统计、作用范围与配置说明见 [手写旋律特点](HANDWRITTEN_MELODY_CHARACTER.md)。第25–28小节的欢快感分析及可泛化的节奏、轮廓、音场与低限情感特征方案见 [天干音阶情感因素建模](TIANGAN_EMOTION_MODEL.md)。
 
 `--chord-progression` 可覆盖规则文件中的和弦进行：
 
@@ -187,6 +191,17 @@ scales/<name>.style.json    CompositionStyle/1
 Meantone 七声音阶（当前为 `major_12`、`major_19`、`major_31`）的自动进行先按种子选择完整的八小节级数路线，每小节一个和弦。路线增加 ii、iii、vi，包含 ii–V–I，并避免 V→ii、V→IV 等反功能连接。短乐句尽可能以 ii–V–I 收束。联合前端沿用整条路线；材料复现中的和声复制仅在与规划一致时保留，否则保留可用的旋律、节奏复现层。CSE 继续优化旋律和实际配器，实际发声仍可能省略小三和弦的三度。
 
 此路径按等五度链结构识别，排除 `ji_major_171` 的二级狼和弦，也不用于当前两份非 meantone 的 22-EDO 七声音阶。显式人工进行优先于自动路线。
+
+可用 `--harmony-model three-tone` 试用按和弦局部比例的“3音”进行。默认仍使用原有逻辑；`--harmony-model legacy` 可明确恢复原模式。新模式先选“3音”组，再选组内和弦，借鉴主功能延长、下属准备、五度连接、大小调色彩与终止回归；天干继续使用自身音高和 32 和弦词汇。固定人工进行仍优先，导入前端 IR 时不能用此参数改写其中的和声。
+
+```bash
+python3 main.py --scale scales/tiangan_72.json --cse-dir CSE_cache \
+  --harmony-model three-tone --seed 42 --bars 8 \
+  --save-frontend-ir output/tiangan_three_tone.ir.json \
+  --output output/tiangan_three_tone.json
+```
+
+3音引擎 v2 始终保留 val 推导的 EDO 音级，分为“和弦内有（present）／仅音阶内有（implied）／音阶外（outside_scale）”三类。辛甲己的3音为第19步，参与正常功能组与解决评分。规则可设置 `harmony.three_tone_progression` 为 `{"enabled": true, "max_integer": 64, "outside_scale_weight": 0.25, "implied_weight": 0.8, "resolution_weight": 1.2}`。复杂度限制只影响自动生成资格，不删除分类。旧 `special_weight` 接受为音阶外组相对权重的别名。每个片段导出类别、比例及来源、功能亲和度、主功能强度、张力、乐句角色与旧功能标签。缺少真实比例时明确报告数据问题。音乐性权重仍需试听调整，详见 [分类与接入说明](THREE_TONE_HARMONY_PLAN.md)。音阶级3音场、15音场、天干甲—辛双中心与以后代码改造所需的数据结构另见 [3音场与15音场理论备忘录](THREE_FIFTEEN_TONE_THEORY.md)。
 
 ```bash
 python3 main.py --scale scales/major_31.json \
@@ -277,6 +292,10 @@ python3 main.py \
 ```
 
 也可直接使用 `retune_melody.py`；该入口会完成前端重调律和伴奏生成。
+
+自动和声现在读取重调律后的固定旋律：首拍、次重拍、其余拍点、弱位的起音权重依次为4、3、1.5、1，并乘以实际重叠时长的平方根。比较旋律入和弦比例及边际 CSE（同一配器音域内 `CSE(和弦+旋律音)-CSE(和弦)`），再结合较弱的和弦连接先验选择整条进行。4/4默认在第1、3拍提供换和弦位置，3/4默认每小节一个，复拍子按附点拍分段。跨边界持续音同时参与两侧评分。显式 `--chord-progression` 仍优先。
+
+每个片段的 `melody_inference` 导出局部评分、CSE覆盖率和前5个候选。CSE缺失部分采用同片段已知候选的中性值，不伪造查表结果；候选超过64个时，每片段保留旋律评分最高的64个参加连接搜索。对手写天干前8小节的核对及局限见 [重调律和声推断分析](RETUNE_HARMONY_ANALYSIS.md)。
 
 ## MSCX 与 IR 往返
 

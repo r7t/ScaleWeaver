@@ -21,12 +21,25 @@ _ACTIVE_CSE_MANIFEST=None
 _ACTIVE_JI_TABLE=None
 _ACTIVE_JI_TABLE_PATH=None
 
-def _configure_adaptive_scale(scale_config=None, cse_dir=None, *, rules_config=None, style_config=None, cse_strength=1.15, cse_harmony_gain=1.0, cse_workers=None, chord_progression=None):
+def _configure_adaptive_scale(scale_config=None, cse_dir=None, *, rules_config=None, style_config=None, cse_strength=1.15, cse_harmony_gain=1.0, cse_workers=None, chord_progression=None, harmony_model=None):
     """Configure the single unified generator for one exact-EDO scale."""
     global _ACTIVE_SCALE_SPEC, _ACTIVE_CSE_BUNDLE, _ACTIVE_CSE_MANIFEST, _ACTIVE_JI_TABLE, _ACTIVE_JI_TABLE_PATH
     scale_path = DEFAULT_SCALE_CONFIG if scale_config is None else scale_config
     if scale_path is None: raise ValueError("A scale definition is required; pass --scale")
     spec = load_scale(scale_path, rules=rules_config, style=style_config, require_composition=True)
+    if harmony_model is not None:
+        if harmony_model not in ('legacy', 'three-tone'):
+            raise ValueError('harmony_model must be legacy or three-tone')
+        from dataclasses import replace
+        import copy
+        harmony = copy.deepcopy(spec.harmony)
+        harmony['three_tone_progression'] = {
+            **harmony.get('three_tone_progression', {}),
+            'enabled': harmony_model == 'three-tone',
+        }
+        rules = copy.deepcopy(spec.rules)
+        rules['harmony'] = harmony
+        spec = replace(spec, harmony=harmony, rules=rules)
     if chord_progression is not None:
         from dataclasses import replace
         import copy
@@ -726,13 +739,15 @@ def generate_score(seed=20260811,bars=48,bpm=96,motif_degrees=None,time_signatur
                    chord_progression=None,frontend_ir=None,frontend_ir_output=None,
                    imitation_reference=None,imitation_staff_id=None,
                    imitation_beam_width=48,retune_melody_source=None,
-                   retune_staff_id=None):
+                   retune_staff_id=None,harmony_model=None):
     sources = [frontend_ir is not None, imitation_reference is not None,
                retune_melody_source is not None]
     if sum(sources) > 1:
         raise ValueError('frontend_ir, imitation_reference and retune_melody_source are mutually exclusive')
     frontend=None
     if frontend_ir is not None:
+        if harmony_model is not None:
+            raise ValueError('harmony_model cannot replace the harmony plan stored in frontend_ir')
         from frontend_ir import load_ir,validate_ir
         frontend=(validate_ir(frontend_ir) if isinstance(frontend_ir,dict)
                   else load_ir(frontend_ir))
@@ -741,7 +756,7 @@ def generate_score(seed=20260811,bars=48,bpm=96,motif_degrees=None,time_signatur
         chord_progression=_ir_progression_argument(frontend)
     spec,manifest=_configure_adaptive_scale(scale_config,cse_dir,rules_config=rules_config,
         style_config=style_config,cse_strength=cse_strength,cse_harmony_gain=cse_harmony_gain,
-        cse_workers=cse_workers,chord_progression=chord_progression)
+        cse_workers=cse_workers,chord_progression=chord_progression,harmony_model=harmony_model)
     from frontend_ir import save_ir,validate_ir
     if frontend is None:
         if not math.isfinite(bpm) or bpm<=0:raise ValueError('bpm must be positive')
@@ -808,6 +823,8 @@ def _build_cli_parser():
     ap.add_argument('--seed',type=int,default=20260811);ap.add_argument('--bars',type=int,default=48)
     ap.add_argument('--bpm',type=float,default=96.0);ap.add_argument('--time-signature',default='4/4')
     ap.add_argument('--chord-progression',help='fixed degree/code loop; auto restores automatic harmony')
+    ap.add_argument('--harmony-model',choices=('legacy','three-tone'),
+                    help='automatic harmony model; default uses rules (legacy unless enabled)')
     ap.add_argument('--cse-dir');ap.add_argument('--cse-workers',type=int)
     ap.add_argument('--output','-o',default='adaptive_score.json')
     ap.add_argument('--frontend-ir',

@@ -11,7 +11,7 @@ use a separate degree progression route with ii-V-I cadences.
 from __future__ import annotations
 from dataclasses import dataclass, replace
 from itertools import combinations
-import math, random
+import math, random, sys
 from pathlib import Path
 from typing import Iterable
 
@@ -104,6 +104,8 @@ ANCHOR_CHORD_ID=None
 ANCHOR_CHORD_IDS=()
 NATURAL_SCALE_MODE=False
 NATURAL_TRIAD_INFO={}
+THREE_TONE_CONFIG={'enabled':False}
+THREE_TONE_INFO={}
 
 _NATURAL_MAJOR_SHAPES=frozenset(((3,4,5),(4,5,6),(5,6,8)))
 _NATURAL_MINOR_SHAPES=frozenset(((10,12,15),(12,15,20),(15,20,24)))
@@ -137,6 +139,7 @@ def configure_scale(spec:ScaleSpec,bundle:SpectralBundle,ji_table=None):
     global SCALE,CSE,OCT,PCS,NAMES,PC_NAME,BASE_FREQ,RANGES,POOLS,VELOCITY,HARD_WOLF,SECOND_MAX_STEP
     global CHORDS,FUNCTION_CHORD_FAMILIES,PALETTE_COLOR_FAMILIES,ANCHOR_CHORD_ID,ANCHOR_CHORD_IDS
     global NATURAL_SCALE_MODE,NATURAL_TRIAD_INFO
+    global THREE_TONE_CONFIG,THREE_TONE_INFO
     global FUNCTION_CLASS_PRIOR,FUNCTION_TRANSITION_LOG_BIAS
     SCALE,CSE=spec,bundle; OCT=int(spec.edo); PCS=tuple(spec.pcs); NAMES=tuple(spec.names); PC_NAME=dict(zip(PCS,NAMES))
     BASE_FREQ=float(spec.base_freq_hz); RANGES=spec.resolved_voice_ranges(); POOLS={v:list(spec.make_pool(*b)) for v,b in RANGES.items()}
@@ -162,13 +165,18 @@ def configure_scale(spec:ScaleSpec,bundle:SpectralBundle,ji_table=None):
             if degree is not None:
                 CHORDS[cid] = replace(chord, function_code={1:"T", 2:"S", 3:"T", 4:"S", 5:"D", 6:"T", 7:"D"}[degree])
     _add_manual_progression_chords(spec)
+    from three_tone_progression import resolve_config, build_annotations
+    THREE_TONE_CONFIG=resolve_config(spec.harmony or {})
+    THREE_TONE_INFO=(build_annotations(spec,CHORDS,ji_table,THREE_TONE_CONFIG)
+                     if THREE_TONE_CONFIG['enabled'] else {})
     FUNCTION_CHORD_FAMILIES={f:frozenset(cid for cid,c in CHORDS.items() if c.function==f) for f in 'TSDC'}
     PALETTE_COLOR_FAMILIES={}
     for cid,c in CHORDS.items(): PALETTE_COLOR_FAMILIES.setdefault(c.prime_class,set()).add(cid)
     PALETTE_COLOR_FAMILIES={k:frozenset(v) for k,v in PALETTE_COLOR_FAMILIES.items()}
     ANCHOR_CHORD_IDS=_anchor_ids(spec)
     ANCHOR_CHORD_ID=ANCHOR_CHORD_IDS[0] if ANCHOR_CHORD_IDS else None
-    if not ANCHOR_CHORD_IDS: raise RuntimeError('no eligible T-function anchor chords found')
+    if not ANCHOR_CHORD_IDS and not THREE_TONE_CONFIG['enabled']:
+        raise RuntimeError('no eligible T-function anchor chords found')
 
 
 def _build_chords(spec):
@@ -687,13 +695,74 @@ def _refresh_primary_from_first_segment(h):
     seg=h['chord_segments'][0]; keys=('chord_id','chord_name','ratio','function','stability','voicing_pcs','prime_support','prime_class','has3','has5','has7','chord_tone_7_colour_mean','melodic_7_colour_strength','max_integer')
     for key in keys:
         if key in seg:h[key]=list(seg[key]) if key in ('voicing_pcs','prime_support') else seg[key]
+    if 'three_tone_status' in seg:
+        h.update({k:v for k,v in seg.items() if k.startswith('three_tone_') or
+                  k in ('legacy_function','phrase_role','target_function')})
     h['end_function']=h['chord_segments'][-1]['function']; h['end_prime_class']=h['chord_segments'][-1]['prime_class']
+def vary_harmonic_rhythm(template, rng, bpb):
+    """Move existing chord boundaries by half a bar without reordering chords.
+
+    Applies to every automatic scale; explicit manual progressions bypass it.
+    Existing interior changes are preserved. Duration floors protect the
+    planned minor colour instead of letting shorter chords erase it.
+    """
+    from melody_plan import resolve_melody_plan
+    probability = float(resolve_melody_plan(SCALE.style.get('melody_plan'))[
+        'harmonic_rhythm_variation'])
+    if not probability or len(template) < 2:
+        return template
+    segments, boundaries = [], [0.]
+    for bar in template:
+        for segment in bar:
+            segments.append(dict(segment))
+            boundaries.append(boundaries[-1]+float(segment['duration']))
+    minor = [s.get('natural_quality') == 'minor' for s in segments]
+    def minor_duration(points):
+        return sum(b-a for a,b,m in zip(points, points[1:], minor) if m)
+    floor = min(minor_duration(boundaries), 2*bpb)
+    choices = [i for i in range(1, len(segments))
+               if abs(boundaries[i]/bpb-round(boundaries[i]/bpb)) < 1e-7
+               and segments[i-1]['chord_id'] != segments[i]['chord_id']]
+    rng.shuffle(choices)
+    moved = False
+    for position, i in enumerate(choices):
+        if rng.random() > probability and (moved or position < len(choices)-1):
+            continue
+        directions = [-1, 1]
+        rng.shuffle(directions)
+        for direction in directions:
+            trial = list(boundaries)
+            trial[i] += direction*bpb/2
+            if (trial[i]-trial[i-1] < bpb/2-1e-7 or
+                    trial[i+1]-trial[i] < bpb/2-1e-7 or
+                    minor_duration(trial) < floor-1e-7):
+                continue
+            boundaries = trial
+            moved = True
+            break
+    result = []
+    for bar in range(len(template)):
+        rows = []
+        for segment, a, b in zip(segments, boundaries, boundaries[1:]):
+            lo, hi = max(a, bar*bpb), min(b, (bar+1)*bpb)
+            if hi-lo <= 1e-7:
+                continue
+            row = dict(segment, offset=round(lo-bar*bpb, 6), duration=round(hi-lo, 6))
+            if rows and rows[-1]['chord_id'] == row['chord_id']:
+                rows[-1]['duration'] = round(rows[-1]['duration']+row['duration'], 6)
+            else:
+                rows.append(row)
+        result.append(rows)
+    return result
+
+
 def harmony_plan(bars,rng,bpb):
     bars=int(bars)
     if bars<=0:raise ValueError('bars must be positive')
     progression = SCALE.resolved_chord_progression()
     if progression is not None:
         return _manual_harmony_plan(bars, bpb, progression)
+    three_tone_mode=THREE_TONE_CONFIG['enabled']
     tiangan_cfg=_tiangan_progression_config() if _is_canonical_tiangan_scale(SCALE) else None
     tiangan_mode=bool(tiangan_cfg and tiangan_cfg['enabled'])
     natural_cfg=_natural_progression_config() if NATURAL_SCALE_MODE else None
@@ -702,7 +771,10 @@ def harmony_plan(bars,rng,bpb):
     prevalence_state={'duration':0.,'hits':{}}
     for ph in range(phrase_count):
         section=FORM_TEMPLATE[ph%len(FORM_TEMPLATE)]
-        if tiangan_mode:
+        if three_tone_mode:
+            from three_tone_progression import make_section
+            template=make_section(sys.modules[__name__],rng,bpb,min(8,bars-len(out)))
+        elif tiangan_mode:
             # TianGan deliberately redraws every phrase instead of copying the
             # A/B templates; the seed remains deterministic, but phrases vary.
             template=make_tiangan_section_harmony(
@@ -719,12 +791,18 @@ def harmony_plan(bars,rng,bpb):
             if section not in templates:
                 templates[section]=make_section_harmony(section,rng,bpb,force_first_bar_tonic=len(out)==0)
             template=templates[section]
+        template = vary_harmonic_rhythm(template, rng, bpb)
         occ=occurrences[section]; occurrences[section]+=1
         for i,template_segments in enumerate(template):
             if len(out)>=bars:break
             segments=[dict(seg) for seg in template_segments]; primary=segments[0]; absolute_bar=len(out)
             row={'bar':absolute_bar,'phrase_index':ph,'bar_in_phrase':i,'subphrase_index':absolute_bar//4,'subphrase_in_phrase':i//4,'bar_in_subphrase':i%4,'section':section,'section_occurrence':occ,'beats_per_bar':bpb,'chord_id':primary['chord_id'],'chord_name':primary['chord_name'],'ratio':primary['ratio'],'function':primary['function'],'stability':primary['stability'],'voicing_pcs':list(primary['voicing_pcs']),'prime_support':list(primary['prime_support']),'prime_class':primary['prime_class'],'has3':primary['has3'],'has5':primary['has5'],'has7':primary['has7'],'chord_tone_7_colour_mean':primary['chord_tone_7_colour_mean'],'melodic_7_colour_strength':primary['melodic_7_colour_strength'],'max_integer':primary['max_integer'],'chords_in_bar':len(segments),'end_function':segments[-1]['function'],'end_prime_class':segments[-1]['prime_class'],'chord_segments':segments}
-            if tiangan_mode:
+            if three_tone_mode:
+                row.update({k:v for k,v in primary.items()
+                            if k.startswith('three_tone_') or k in
+                            ('harmony_model','legacy_function','phrase_role','target_function',
+                             'natural_triad','natural_quality','natural_ji_shape','root_degree','root_pc')})
+            elif tiangan_mode:
                 row.update({'harmony_model':'tiangan_ranked_TSDT',
                             'target_function':primary['target_function'],
                             'tiangan_stability_score':primary['tiangan_stability_score'],
@@ -737,7 +815,7 @@ def harmony_plan(bars,rng,bpb):
                             'natural_ji_shape':list(primary['natural_ji_shape']),
                             'natural_triad_count':len(NATURAL_TRIAD_INFO)})
             out.append(row)
-    if out and not tiangan_mode and not natural_mode:
+    if out and not three_tone_mode and not tiangan_mode and not natural_mode:
         out[0]['chord_segments'][0]=_force_anchor_segment(out[0]['chord_segments'][0],rng); _refresh_primary_from_first_segment(out[0])
         out[-1]['chord_segments'][-1]=_force_anchor_segment(out[-1]['chord_segments'][-1],rng); _refresh_primary_from_first_segment(out[-1])
     return out
@@ -774,6 +852,8 @@ def _manual_harmony_plan(bars, bpb, progression):
             seg['root_degree'] = d
         else:
             seg['chord_code'] = token
+        if THREE_TONE_CONFIG['enabled']:
+            seg.update(THREE_TONE_INFO[c.id])
         ph, local = divmod(bar, phrase_bars)
         section = FORM_TEMPLATE[ph % len(FORM_TEMPLATE)]
         h = {
@@ -792,6 +872,8 @@ def _manual_harmony_plan(bars, bpb, progression):
         else:
             h['chord_code'] = token
         _refresh_primary_from_first_segment(h)
+        if THREE_TONE_CONFIG['enabled']:
+            h.update(THREE_TONE_INFO[c.id])
         out.append(h)
     return out
 

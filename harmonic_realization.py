@@ -21,6 +21,9 @@ def musical_root(hr, segment):
 
 def is_anchor(hr, segment):
     pcs = set(hr.CHORDS[segment['chord_id']].pcs)
+    if segment.get('harmony_model') == 'three_tone':
+        return (segment.get('phrase_role') in ('cadence', 'establish') and
+                tonic_pc(hr) in pcs)
     return any(pcs == set(hr.CHORDS[cid].pcs) for cid in hr.ANCHOR_CHORD_IDS)
 
 

@@ -29,6 +29,9 @@ STYLE_PARAMETERS_FILE = "scales/tiangan_72_5_norm.style.json"
 # SCALE_DEFINITION_FILE = "scales/major_31.json"
 # COMPOSITION_RULES_FILE = "scales/major_31.rules.json"
 # STYLE_PARAMETERS_FILE = "scales/major_31.style.json"
+# SCALE_DEFINITION_FILE = "scales/major_12.json"
+# COMPOSITION_RULES_FILE = "scales/major_12.rules.json"
+# STYLE_PARAMETERS_FILE = "scales/major_12.style.json"
 # SCALE_DEFINITION_FILE = "scales/ji_major_171.json"
 # COMPOSITION_RULES_FILE = "scales/ji_major_171.rules.json"
 # STYLE_PARAMETERS_FILE = "scales/ji_major_171.style.json"
@@ -116,6 +119,7 @@ def main(argv=None):
                     help="copy and minimum-RMS retune the complete source melody")
     ap.add_argument("--retune-staff-id")
     ap.add_argument("--save-frontend-ir",action="store_true")
+    ap.add_argument('--harmony-model',choices=('legacy','three-tone'),default='three-tone')
     g=ap.add_mutually_exclusive_group()
     g.add_argument("--allow-sixteenth",dest="allow_sixteenth",action="store_true")
     g.add_argument("--no-sixteenth",dest="allow_sixteenth",action="store_false")
@@ -157,7 +161,8 @@ def main(argv=None):
 
     cmd=[sys.executable,str(MAIN_PY),"--scale",str(scale),"--seed",str(seed),
          "--bars",str(args.bars),"--bpm",str(args.bpm),"--time-signature",args.time_signature,
-         "--cse-dir",str(Path(args.cse_dir).expanduser().resolve()),"--output",str(json_path)]
+         "--cse-dir",str(Path(args.cse_dir).expanduser().resolve()),"--output",str(json_path),
+         '--harmony-model',args.harmony_model]
     cmd += ["--rules",str(rules),"--style",str(style)]
     if args.imitation_reference is not None:
         cmd += ["--imitate-rhythm",str(Path(args.imitation_reference).expanduser().resolve()),

@@ -75,6 +75,7 @@ class ManualProgressionTests(unittest.TestCase):
 
     def test_manual_internal_relations_are_rhythm_only(self):
         cfg={
+            'paired_phrases': False,
             'cross_phrase_form_weights':
                 {'AABBAB':1,'AAB_CBC':0,'ABCABC':0,'ABACBC':0,'ABCDAC':0},
             'macro_pattern_weights':

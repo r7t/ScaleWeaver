@@ -26,6 +26,9 @@ MODE_LAYERS = {
 
 
 DEFAULTS = {
+    "paired_phrases": True,
+    "alternating_rhythm_probability": 0.0,
+    "harmonic_rhythm_variation": 0.4,
     "enabled": True,
     "unit_bars": 0.5,
     "leaf_span_weights": {"0.5": 0.25, "1": 0.45, "2": 0.30},
@@ -118,6 +121,8 @@ DEFAULTS = {
         "fancy_frequency_multiplier": 0.35,
         "syncopated_frequency_multiplier": 0.35,
         "straight_flow_frequency_multiplier": 1.2,
+        "sixteenth_cell_weights": {"3+1": 1.0, "1+3": 1.0, "1+2+1": 1.0},
+        "melodic_shape_weight": 0.0,
         "allow_cross_unit_ties": True,
         "cross_half_bar_tie_probability": 0.18,
         "cross_bar_tie_probability": 0.12,
@@ -131,6 +136,7 @@ DEFAULTS = {
             "strong_beat_chord_tone": 0.42,
             "harmony_transition": 0.16,
             "cadence": 0.55,
+            "rhythm_style": 0.0,
         },
     },
 }
@@ -182,6 +188,12 @@ def _validate_weights(row, path):
 
 def resolve_melody_plan(supplied=None):
     cfg = _merge(DEFAULTS, supplied)
+    if not 0 <= float(cfg['alternating_rhythm_probability']) <= 1:
+        raise ValueError('alternating_rhythm_probability must be in 0..1')
+    if not isinstance(cfg['paired_phrases'], bool):
+        raise ValueError('melody_plan.paired_phrases must be boolean')
+    if not 0 <= float(cfg['harmonic_rhythm_variation']) <= 1:
+        raise ValueError('melody_plan.harmonic_rhythm_variation must be in 0..1')
     if float(cfg["unit_bars"]) != 0.5:
         raise ValueError("melody_plan.unit_bars is currently fixed at 0.5")
     for key in ("leaf_span_weights", "fresh_root_count_weights", "cross_phrase_form_weights",
@@ -238,6 +250,11 @@ def resolve_melody_plan(supplied=None):
             "melody_plan.joint_generation.straight_flow_frequency_multiplier must be positive")
     if any(not math.isfinite(float(v)) or float(v) < 0 for v in joint["weights"].values()):
         raise ValueError("melody_plan.joint_generation.weights must be finite and nonnegative")
+    if not math.isfinite(float(joint['melodic_shape_weight'])) or float(joint['melodic_shape_weight']) < 0:
+        raise ValueError('melodic_shape_weight must be finite and nonnegative')
+    if any(not math.isfinite(float(v)) or not 0 < float(v) <= 4
+           for v in joint['sixteenth_cell_weights'].values()):
+        raise ValueError('sixteenth_cell_weights must be finite and in (0, 4]')
     for role in BAR_ROLES:
         profile = cfg["bar_role_profiles"].get(role)
         if not isinstance(profile, dict):
@@ -663,6 +680,58 @@ def generate(seed, bars=48, beats_per_bar=4, supplied=None,
                         "rhythm_fidelity": "fresh", "melody_transform": "fresh",
                         "octave_shift": 0, "relation_id": None,
                     })
+
+    if cfg['paired_phrases']:
+        for section in sections:
+            start = int(section['start_bar'])
+            span = int(section['span_bars'])
+            alternating = (random.Random(int(seed) ^ (start*1009) ^ 0x52454341).random()
+                           < cfg['alternating_rhythm_probability'])
+            # Backward edges at three nested scales; never cross a phrase edge.
+            for bar in range(span):
+                local = bar % 8
+                source_bar = (0, 0, 0, 1, 0, 1, 2, 3)[local]
+                role = ('statement', 'answer', 'develop', 'develop',
+                        'recall', 'recall', 'liquidate', 'close')[local]
+                answer_type = rng.choice(('opening', 'ending', 'sequence', 'rhythm'))
+                sequence_shift = rng.choice((-2, -1, 1, 2))
+                for half_index in range(2):
+                    row = actions[(start + bar)*2 + half_index]
+                    source = ((start + bar-local + source_bar)*2 + half_index
+                              if local else None)
+                    row['paired_phrase'] = {
+                        'role': role, 'source_unit': source,
+                        'closing': bar == span-1 and half_index == 1,
+                        'answer_type': answer_type,
+                        'sequence_shift': sequence_shift,
+                        'half_index': half_index,
+                        'rhythm_independent': alternating and local == 1,
+                        'rhythm_recall': alternating and 2 <= local <= 5,
+                    }
+                    # Preserve intentional cross-section melody copies. Local
+                    # copies become answers that can adapt to incoming harmony.
+                    if row['source_unit'] is not None and row['source_unit'] >= start*2:
+                        row.update(mode='FRESH', source_unit=None, source_start_bar=None,
+                                   rhythm_fidelity='fresh', melody_transform='fresh',
+                                   octave_shift=0, relation_id=None)
+                    elif row['mode'] == 'R':
+                        row.update(mode='FRESH', source_unit=None, source_start_bar=None,
+                                   rhythm_fidelity='fresh', relation_id=None)
+                    elif row['mode'] == 'RH':
+                        row.update(mode='H', rhythm_fidelity='fresh')
+
+    # Report effective inheritance after the paired-phrase overlay.
+    for relation in relations:
+        relation['target_units'] = [i for i in relation['target_units']
+                                    if actions[i]['relation_id'] == relation['id']]
+        relation['realized_length_bars'] = len(relation['target_units'])*unit_bars
+        if relation['target_units']:
+            mode = actions[relation['target_units'][0]]['mode']
+            relation['mode'] = mode
+            relation['layers'] = sorted(MODE_LAYERS[mode])
+            if 'R' not in MODE_LAYERS[mode]:
+                relation['rhythm_fidelity'] = 'fresh'
+    relations = [r for r in relations if r['target_units']]
 
     leaves = (_one_bar_material_leaves(actions,sections) if manual_progression else
               _partition_material_leaves(actions, sections, cfg, rng))

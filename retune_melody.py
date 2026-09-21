@@ -192,8 +192,14 @@ def generate_frontend_ir(reference_path, *, seed=20260811, bpm=96.0,
             "generation aborted before accompaniment annealing")
     measure_map = analysis["reference"]["measure_map"]
     bars = len(measure_map)
-    plan = _scaled_harmony_plan(bars, random.Random(int(seed)), measure_map)
     mapped, mapping = retune_events(analysis, spec)
+    if spec.resolved_chord_progression():
+        plan = _scaled_harmony_plan(bars, random.Random(int(seed)), measure_map)
+        harmony_method = 'explicit_progression'
+    else:
+        from retune_harmony import infer_harmony
+        plan = infer_harmony(mapped, measure_map)
+        harmony_method = 'metrical_marginal_cse_v1'
     rng = random.Random(int(seed) ^ 0x524554554E45)
     lead = []
     for index, row in enumerate(mapped):
@@ -216,6 +222,7 @@ def generate_frontend_ir(reference_path, *, seed=20260811, bpm=96.0,
     first_bpb = float(measure_map[0]["duration_beats"])
     metadata = {
         "mode": "exact_melody_retune",
+        "harmony_inference": harmony_method,
         "absolute_pitch_count": analysis["absolute_pitch_count"],
         "source_scale_note_count": analysis["source_scale_note_count"],
         "target_scale_note_count": len(spec.pcs),

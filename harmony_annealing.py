@@ -385,6 +385,12 @@ class Energy:
 
     def _build_factors(self):
         w=self.config['objective_weights'];duration=self.score['bars']*self.score['beats_per_bar']
+        balance = self.config['bass_balance']
+        bass_ids = self.by_voice.get('bass', [])
+        if balance['weight'] and bass_ids:
+            durations = tuple(self.events[i]['duration_beats'] for i in bass_ids)
+            self.add('bass_balance', bass_ids, balance['weight'],
+                     (durations, sum(durations), balance['max_share']))
         points=sorted(set(self.starts+self.ends))
         self.slices=[]
         starts_at={};ends_at={}
@@ -471,6 +477,13 @@ class Energy:
                       if 3<=len(xs)<=5 else 0.0)
                    + self.config['sounding_octave_fifth_subset_cost']
                    * octave_fifth_four_subset(tuple(sorted(xs)),self.metric.edo))
+        elif kind=='bass_balance':
+            durations,total,ceiling=data
+            shares={}
+            for pitch,duration in zip(xs,durations):
+                pc=pitch % self.metric.edo
+                shares[pc]=shares.get(pc,0.0)+duration/total
+            value=sum(max(0.0,share-ceiling)**2 for share in shares.values())
         elif kind=='harmonic_realization':
             voices,pcs,root=data
             value=realization_cost(xs,voices,pcs,root,self.metric.edo,
@@ -556,7 +569,7 @@ class Energy:
         self.pitches=list(pitches);self.values=[self.evaluate(f) for f in self.factors];self.total=math.fsum(self.values)
 
     def components(self):
-        out=dict.fromkeys(('attack','sounding','background','voice_leading','pitch_class_reward','harmonic_realization'),0.0)
+        out=dict.fromkeys(('attack','sounding','background','voice_leading','pitch_class_reward','harmonic_realization','bass_balance'),0.0)
         for f,v in zip(self.factors,self.values):out['voice_leading' if f[0]=='register' else f[0]]+=v
         return out
 
@@ -570,7 +583,7 @@ class Energy:
             'sounding_energy':parts['sounding'],
             # Register and voice-specific pitch-class terms describe how each
             # individual line is written, so they belong to this fourth bucket.
-            'voice_leading_energy':parts['voice_leading']+parts['pitch_class_reward'],
+            'voice_leading_energy':parts['voice_leading']+parts['pitch_class_reward']+parts['bass_balance'],
         }
 
     def export(self):
@@ -579,8 +592,24 @@ class Energy:
             e.update(step=p,name=hr.pitch_name(p),freq=hr.freq(p))
 
 
+def bass_distribution(score, edo):
+    """Attack and duration shares are different for a sustained bass line."""
+    events=score['voices'].get('bass', [])
+    counts={};durations={}
+    for event in events:
+        pc=str(int(event['step']) % edo)
+        counts[pc]=counts.get(pc,0)+1
+        durations[pc]=durations.get(pc,0.0)+event['duration_beats']
+    total=sum(durations.values())
+    shares={pc:d/total for pc,d in durations.items()} if total else {}
+    return dict(attack_counts=counts, duration_beats=durations,
+                duration_shares=shares, max_duration_share=max(shares.values(),default=0.0),
+                effective_pitch_classes=1/sum(s*s for s in shares.values()) if shares else 0.0)
+
+
 def optimize(score,metric,config):
     started=time.perf_counter();energy=Energy(score,metric,config)
+    initial_bass=bass_distribution(score,metric.edo)
     initial=energy.total;initial_components=energy.components();best=initial;best_pitches=list(energy.pitches)
     initial_sources=energy.energy_sources()
     initial_salience=metric.prime_salience.diagnostics(score) if metric.prime_salience.enabled else None
@@ -634,6 +663,7 @@ def optimize(score,metric,config):
         'final_sum':math.fsum(final_sources.values()),
     }
     return {'enabled':True,'method':'whole_score_onset_group_annealing','config':copy.deepcopy(config),
+            'bass_distribution':{'initial':initial_bass,'final':bass_distribution(score,metric.edo)},
             'subset_cse_cache_manifest':str(metric.subset_cache.manifest_path),
             'initial_energy':initial,'final_energy':energy.total,'initial_components':initial_components,
             'final_components':energy.components(),'energy_sources':energy_sources,

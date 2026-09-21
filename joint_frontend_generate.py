@@ -9,9 +9,11 @@ import math
 import random
 
 import harmony_rhythm as hr
+from melody_character import rhythm_preference
 import score_builder as sb
 from frontend_ir import build_ir, save_ir
 from melody_plan import MODE_LAYERS, generate as generate_plan, resolve_melody_plan
+from phrase_skeleton import make_skeleton, expand_rhythms, structural_pitch
 
 
 EPS = 1e-7
@@ -84,7 +86,8 @@ def _fresh_rhythms(cells, target, limit, rng, dense_min_notes=5,
                    dense_candidate_probability=0.0,
                    fancy_frequency_multiplier=0.5,
                    syncopated_frequency_multiplier=0.5,
-                   straight_flow_frequency_multiplier=1.0):
+                   straight_flow_frequency_multiplier=1.0,
+                   sixteenth_cell_weights=None):
     """Weighted candidates near the target density, without forced replacement."""
     count = max(1, int(limit))
     available = list(cells)
@@ -108,6 +111,8 @@ def _fresh_rhythms(cells, target, limit, rng, dense_min_notes=5,
         ]
         weights = hr.apply_category_frequency_multiplier(
             weights, straight_flow, straight_flow_frequency_multiplier)
+        weights = [w*rhythm_preference(row, sixteenth_cell_weights)
+                   for row, w in zip(available, weights)]
         chosen = rng.choices(available, weights=weights, k=1)[0]
         result.append(chosen)
         available.remove(chosen)
@@ -261,7 +266,8 @@ def _guide_degrees(section, unit, count, profile):
     contour = profile["contour"]
     guides = []
     for i in range(count):
-        t = i / (count - 1)
+        # A single contour spans the whole bar, not two restarted half-bars.
+        t = (unit % 2 + i / (count - 1)) / 2.0
         if contour == "rise":
             shape = t - 0.42
         elif contour == "fall":
@@ -269,8 +275,7 @@ def _guide_degrees(section, unit, count, profile):
         elif contour == "arch":
             shape = 1.0 - 2.0 * abs(t - 0.5) - 0.35
         elif contour == "wave":
-            sign = 1.0 if unit % 2 == 0 else -1.0
-            shape = sign * (t - 0.5)
+            shape = math.sin(math.pi * t) - .5
         else:
             shape = 0.0
         guides.append(max(low, min(high, int(round(centre + amplitude * shape)))))
@@ -318,13 +323,16 @@ def _tie_probability(state, harmony, durations, section, unit, role, joint):
 
 
 def _fresh_pitches(state, harmony, durations, section, unit, role_profile, rng,
-                   motif_queue, role, joint):
+                   motif_queue, role, joint, skeleton=None):
     prev, prev2 = state["prev"], state["prev2"]
     recent = list(state["recent"])
     guides = _guide_degrees(section, unit, len(durations), role_profile)
     direction = _role_direction(role_profile, unit)
     tie_first = rng.random() < _tie_probability(
         state, harmony, durations, section, unit, role, joint)
+    if skeleton and tie_first:
+        # A common-tone continuation may realize the opening structural tone.
+        tie_first = all(sb.lead_jump_ok(prev, a['step']) for a in skeleton[1:])
     pitches, attacks = [], []
     offset = 0.0
     for index, duration in enumerate(durations):
@@ -348,6 +356,8 @@ def _fresh_pitches(state, harmony, durations, section, unit, role_profile, rng,
                                       hr.degree_pitch(guides[index]), prev)
         candidate = sb.fit_lead_pitch_to_jump(candidate, prev,
                                               hr.degree_pitch(guides[index]), True)
+        if skeleton and not continuation:
+            candidate = structural_pitch(candidate, prev, offset, skeleton, recent)
         pitches.append(int(candidate))
         attacks.append(not continuation)
         if not continuation:
@@ -416,6 +426,7 @@ def _unit_cost(state, harmony, durations, pitches, attacks, section, unit,
             if old is not None:
                 voice += sb._lead_interval_cost(abs(hr.degree(pitch) - hr.degree(old)))
             voice += sb._lead_motion_diversity_cost(recent, pitch, strong, duration)
+            voice += sb._lead_reference_shape_cost(recent, pitch, duration)
             voice += sb._lead_ngram_prior_cost(recent, pitch)
             attack_count += 1
         background += sb.cse_rt.lead_chord_field_cost(chord, pitch, strong)
@@ -451,6 +462,8 @@ def _unit_cost(state, harmony, durations, pitches, attacks, section, unit,
         "register": register, "density": density, "voice_leading": voice,
         "background": background, "strong_beat_chord_tone": strong_cost,
         "harmony_transition": transition, "cadence": cadence,
+        "rhythm_style": -math.log(rhythm_preference(
+            durations, hr.SCALE.style.get('melody_plan', {}).get('joint_generation', {}).get('sixteenth_cell_weights'))),
     }
     return sum(float(weights[key]) * value for key, value in components.items()), components
 
@@ -541,6 +554,7 @@ def _assemble_harmony(materials, banks, plan, bars, bpb, rng):
         # mandatory closing anchor even after mixed-layer inheritance.
         phrase_bars = int(plan["section_size_bars"])
         if (not plan.get("manual_progression") and
+                base.get('harmony_model') != 'three_tone' and
                 (bar+1) % phrase_bars == 0 and
                 segments[-1]["chord_id"] not in hr.ANCHOR_CHORD_IDS):
             segments[-1] = hr._force_anchor_segment(segments[-1], rng)
@@ -568,10 +582,10 @@ def generate_frontend_ir(seed=20260811, bars=48, bpm=96.0, motif_degrees=None,
     progression = spec.resolved_chord_progression()
     progression_bars = (len(progression.get("codes") or progression.get("degrees")) *
                         int(progression["bars_per_chord"])) if progression else None
-    natural_mode = (hr.NATURAL_SCALE_MODE and progression is None and
-                    hr._natural_progression_config()['enabled'])
-    # Choose a complete route once: local CSE comparisons must not cherry-pick
-    # major chords from different routes and destroy ii-V-I or introduce D-S.
+    natural_mode = (progression is None and (hr.THREE_TONE_CONFIG['enabled'] or
+                    (hr.NATURAL_SCALE_MODE and hr._natural_progression_config()['enabled'])))
+    # Keep complete natural/3-tone phrases through the joint search, so local
+    # CSE comparisons cannot splice away preparation or cadence boundaries.
     natural_bank = (hr.harmony_plan(bars, random.Random(int(seed)), bpb)
                     if natural_mode else None)
     planned_harmony = ([tuple((s['chord_id'],s['offset'],s['duration'])
@@ -644,9 +658,23 @@ def generate_frontend_ir(seed=20260811, bars=48, bpm=96.0, motif_degrees=None,
                                                 joint["dense_half_candidate_probability"],
                                                 joint["fancy_frequency_multiplier"],
                                                 joint["syncopated_frequency_multiplier"],
-                                                joint["straight_flow_frequency_multiplier"])
+                                                joint["straight_flow_frequency_multiplier"],
+                                                joint["sixteenth_cell_weights"])
             for hi, harmony in enumerate(harmony_choices):
-                for ri, rhythm in enumerate(rhythm_choices):
+                skeleton = []
+                realized_rhythms = rhythm_choices
+                relation = action.get('paired_phrase')
+                if relation and 'M' not in layers and not (motif_queue and unit < 4):
+                    paired_source = (state['materials'][relation['source_unit']]
+                                     if relation['source_unit'] is not None else None)
+                    skeleton = make_skeleton(
+                        state, harmony, _guide_degrees(section, unit, 2, role_profile),
+                        relation, paired_source, allow_sixteenth)
+                    realized_rhythms = expand_rhythms(
+                        rhythm_choices, cells, skeleton,
+                        None if relation.get('rhythm_independent') else paired_source, relation,
+                        joint['rhythm_candidates'], joint['sixteenth_cell_weights'])
+                for ri, rhythm in enumerate(realized_rhythms):
                     if "M" in layers:
                         segment_id = reprise_segment_for_unit[unit]
                         octave_decisions = state["octave_reprise_decisions"]
@@ -678,9 +706,10 @@ def generate_frontend_ir(seed=20260811, bars=48, bpm=96.0, motif_degrees=None,
                                                  hi * 257 + ri * 31 + mi))
                             pitch_choices.append(_fresh_pitches(
                                 state, harmony, rhythm, section, unit, role_profile,
-                                crng, motif_queue, role, joint))
+                                crng, motif_queue, role, joint, skeleton))
                     for mi, (pitches, attacks) in enumerate(pitch_choices):
-                        pitches = _cadence_pitches(state,pitches,unit)
+                        if not skeleton and not relation:
+                            pitches = _cadence_pitches(state,pitches,unit)
                         if (attacks and not attacks[0] and
                                 pitches[0] != state["prev"]):
                             attacks[0] = True
@@ -696,6 +725,14 @@ def generate_frontend_ir(seed=20260811, bars=48, bpm=96.0, motif_degrees=None,
                         material = {"harmony": copy.deepcopy(harmony),
                                     "rhythm": tuple(rhythm), "pitches": tuple(pitches),
                                     "attacks": tuple(bool(x) for x in attacks)}
+                        structural = skeleton
+                        if 'M' in layers:
+                            structural = source.get('skeleton', [])
+                        material['skeleton'] = [
+                            {'offset': a['offset'],
+                             'step': int(pitches[_onsets(rhythm).index(round(a['offset'], 6))])}
+                            for a in structural
+                            if round(a['offset'], 6) in _onsets(rhythm)]
                         actual_pitches = [pitch for pitch, attack in
                                           zip(pitches, attacks) if attack]
                         if actual_pitches:
@@ -735,6 +772,10 @@ def generate_frontend_ir(seed=20260811, bars=48, bpm=96.0, motif_degrees=None,
         beam = next_beam[:joint["beam_width"]]
 
     best = beam[0]
+    plan['realized_materials'] = [
+        {'unit': i, 'skeleton': m.get('skeleton', []),
+         'rhythm': list(m['rhythm'])}
+        for i, m in enumerate(best['materials'])]
     assembly_rng = random.Random(int(seed) ^ 0x415353454D424C59)
     harmony = _assemble_harmony(best["materials"], banks, plan, bars, bpb, assembly_rng)
     best_lead = _merge_lead_continuations(best["lead"])
