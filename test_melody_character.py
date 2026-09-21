@@ -1,12 +1,36 @@
 import random
 import unittest
 
-from melody_character import shape_cost, sixteenth_cells, rhythm_preference
+from melody_character import shape_cost, shape_statistics, sixteenth_cells, rhythm_preference, INTERVAL_TARGETS
 from melody_plan import resolve_melody_plan
 from joint_frontend_generate import _fresh_rhythms
 
 
 class MelodyCharacterTests(unittest.TestCase):
+    def test_history_summary_preserves_original_shape_score(self):
+        rng = random.Random(626)
+        for _ in range(300):
+            recent = [rng.randrange(-20, 21) for _ in range(rng.randrange(1, 60))]
+            candidate = rng.randrange(-20, 21)
+            duration = rng.choice((.25, .5, 1.))
+            pitches = recent[-25:]
+            intervals = [b-a for a, b in zip(pitches, pitches[1:])]
+            jump = candidate-pitches[-1]
+            category = min(4, abs(jump))
+            target = INTERVAL_TARGETS[category]
+            expected = (sum(min(4, abs(d)) == category for d in intervals)
+                        +8*target)/(len(intervals)+8)-target
+            if jump == 0:
+                expected += .18
+            if intervals and jump and intervals[-1]:
+                pairs = [(a, b) for a, b in zip(intervals, intervals[1:]) if a and b]
+                turn_rate = (sum(a*b < 0 for a, b in pairs)+8*.43)/(len(pairs)+8)
+                expected += .35*(turn_rate-.43)*(int(jump*intervals[-1] < 0)-.43)
+            expected *= .3 if duration <= .250001 else 1.
+            self.assertEqual(shape_cost(recent, candidate, int, duration,
+                             shape_statistics(recent, int)), expected)
+        self.assertEqual(shape_cost([], 0, int), 0.)
+
     def test_exact_sixteenth_units_and_no_eighth_note_confusion(self):
         self.assertEqual(sixteenth_cells((.75,.25,.25,.75,.25,.5,.25)),
                          {'3+1':2,'1+3':1,'1+2+1':1})

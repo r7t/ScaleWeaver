@@ -240,6 +240,9 @@ def configure_scale(spec):
     _NGRAM_TABLE=load_ngram_table(spec.resolved_ngram_path(), edo=spec.edo, allowed_pcs=spec.pcs)
     ratio_cost.cache_clear()
     _lead_interval_cost.cache_clear()
+    _lead_shape_statistics.cache_clear()
+    _lead_history_counts.cache_clear()
+    _lead_history_intervals.cache_clear()
 
 # Lead register potential.  Defaults are overwritten by configure_scale().
 LEAD_REGISTER_TARGET_STEP = 0.0
@@ -302,12 +305,31 @@ LEAD_BOUNDARY_FOOT_REWARD = .20
 
 _NGRAM_TABLE = EMPTY_NGRAM_TABLE
 
+@lru_cache(maxsize=8192)
+def _lead_shape_statistics(pitches):
+    from melody_character import shape_statistics
+    return shape_statistics(pitches,degree)
+
+@lru_cache(maxsize=8192)
+def _lead_history_counts(pitches):
+    counts={}
+    for p in pitches:
+        pc=int(p)%OCT
+        counts[pc]=counts.get(pc,0)+1
+    return counts
+
+@lru_cache(maxsize=8192)
+def _lead_history_intervals(pitches):
+    degrees=[degree(p) for p in pitches]
+    return tuple(abs(b-a) for a,b in zip(degrees,degrees[1:]))
+
 def _lead_reference_shape_cost(recent, cand, duration=1.):
     weight = float(hr.SCALE.style.get('melody_plan', {}).get('joint_generation', {}).get('melodic_shape_weight', 0.))
     if not weight:
         return 0.
     from melody_character import shape_cost
-    return weight * shape_cost(recent, cand, degree, duration)
+    statistics=_lead_shape_statistics(tuple(recent[-25:])) if recent else None
+    return weight * shape_cost(recent, cand, degree, duration,statistics)
 
 def _lead_ngram_prior_cost(recent, cand):
     # A 2..5-gram can inspect at most the previous four symbols.  Converting
@@ -516,8 +538,7 @@ def _lead_motion_diversity_cost(recent, cand, strong=False, duration=1.0):
     if not recent or (LEAD_LEAP_TARGET_RATE<=0. and
                       LEAD_LARGE_LEAP_TARGET_RATE<=0.):
         return 0.0
-    window=list(recent[-(LEAD_LEAP_BALANCE_WINDOW+1):])
-    intervals=[abs(degree(b)-degree(a)) for a,b in zip(window,window[1:])]
+    intervals=_lead_history_intervals(tuple(recent[-(LEAD_LEAP_BALANCE_WINDOW+1):]))
     candidate_distance=abs(degree(int(cand))-degree(int(recent[-1])))
 
     def component(target,threshold,gain):
@@ -665,10 +686,7 @@ def lead_candidate_cost_components(prev, prev2, chord, strong, recent, cand,
             return None
     else:
         dd = ad = 0
-    pc_counts = {}
-    for pitch in recent:
-        prior_pc = int(pitch) % OCT
-        pc_counts[prior_pc] = pc_counts.get(prior_pc, 0) + 1
+    pc_counts = _lead_history_counts(tuple(recent))
     recent_mean_step = None
     if recent and LEAD_REGISTER_CENTROID_FEEDBACK != 0.0:
         window = recent[-int(LEAD_REGISTER_CENTROID_WINDOW):]

@@ -27,6 +27,11 @@ class PrimeSalience:
                                     for name, ratio in INTERVAL_RATIOS.items())
         self._features = lru_cache(maxsize=100000)(self._features)
         self._interval_features = lru_cache(maxsize=100000)(self._interval_features)
+        self._active_intervals=tuple((name,target) for name,target in self.interval_cents
+                                    if config['interval_rewards'][name])
+        self._weighted_prime_features=any(config[k] for k in ('weight_5','weight_7','joint_weight'))
+        self._active_interval_features=lru_cache(maxsize=100000)(
+            lambda xs:self._interval_features_for(xs,self._active_intervals))
 
     def _fusion(self, cents):
         c = self.config
@@ -51,10 +56,13 @@ class PrimeSalience:
         return dict(zip(INTERVAL_RATIOS, values))
 
     def _interval_features(self, xs):
+        return self._interval_features_for(xs,self.interval_cents)
+
+    def _interval_features_for(self, xs, intervals):
         cents = [1200*x/self.edo for x in xs]
         fusion_factor = 1-self.config['fusion_discount']*self._fusion(cents)
         values = []
-        for _, target in self.interval_cents:
+        for _, target in intervals:
             best = 0.0
             for i, a in enumerate(cents):
                 for j in range(i+1, len(cents)):
@@ -91,10 +99,13 @@ class PrimeSalience:
     def reward(self, pitches, context):
         if not self.enabled:
             return 0.0
-        s5, s7, _ = self.features(pitches)
+        s5,s7,_ = self.features(pitches) if self._weighted_prime_features else (0.,0.,0.)
         c = self.config
+        xs=sorted(pitches)
+        values=(self._active_interval_features(tuple(x-xs[0] for x in xs))
+                if len(xs)>=2 and self._active_intervals else ())
         directed = sum(c['interval_rewards'][name]*value
-                       for name, value in self.interval_features(pitches).items())
+                       for (name,_),value in zip(self._active_intervals,values))
         return c[context+'_weight']*(directed+c['weight_5']*s5+c['weight_7']*s7
                                      +c['joint_weight']*min(s5, s7))
 

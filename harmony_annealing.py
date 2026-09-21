@@ -12,6 +12,7 @@ import math
 import random
 import time
 from functools import lru_cache
+from operator import itemgetter
 
 import numpy as np
 import harmony_rhythm as hr
@@ -374,7 +375,12 @@ class Energy:
                     for p in self.domains[i]
                 }
         self._motion_value=lru_cache(maxsize=500000)(self._motion_value_uncached)
+        self._build_proposal_masks()
+        # Cache the complete vertical objective, including octave penalties and
+        # realization. Values depend on this Energy's immutable configuration.
+        self._vertical_value=lru_cache(maxsize=100000)(self._vertical_value)
         self._build_factors()
+        self._factor_evaluators=[self._compile_factor(f) for f in self.factors]
         self.values=[self.evaluate(f) for f in self.factors]
         self.total=math.fsum(self.values)
 
@@ -460,7 +466,41 @@ class Energy:
                     self.add('pitch_class_reward',(i,),1.0/len(ids),rewards)
 
     def evaluate(self,factor):
-        kind,ids,scale,data=factor;xs=tuple(self.pitches[i] for i in ids)
+        kind,ids,scale,data=factor
+        if kind in ('background','register','pitch_class_reward'):
+            return scale*data[self.pitches[ids[0]]]
+        xs=tuple(self.pitches[i] for i in ids)
+        if kind in ('sounding','attack','harmonic_realization'):
+            return scale*self._vertical_value(kind,xs,data)
+        if kind=='bass_balance':
+            durations,total,ceiling=data
+            shares={}
+            for pitch,duration in zip(xs,durations):
+                pc=pitch % self.metric.edo
+                shares[pc]=shares.get(pc,0.0)+duration/total
+            value=sum(max(0.0,share-ceiling)**2 for share in shares.values())
+        else:value=self._motion_value(data,xs)
+        return scale*value
+
+    def _compile_factor(self,factor):
+        """Bind immutable factor metadata once; gather pitches in C."""
+        kind,ids,scale,data=factor
+        if kind in ('background','register','pitch_class_reward'):
+            i=ids[0]
+            return lambda pitches:scale*data[pitches[i]]
+        gather=itemgetter(*ids)
+        if len(ids)==1:
+            single=gather
+            gather=lambda pitches:(single(pitches),)
+        if kind in ('sounding','attack','harmonic_realization'):
+            value=self._vertical_value
+            return lambda pitches:scale*value(kind,gather(pitches),data)
+        if kind=='voice_leading':
+            value=self._motion_value
+            return lambda pitches:scale*value(data,gather(pitches))
+        return lambda pitches:self.evaluate(factor)
+
+    def _vertical_value(self,kind,xs,data):
         if kind=='sounding':
             allowance=int(self.config['sounding_octave_family_pair_allowance'].get(str(len(xs)),1))
             value=(self.metric.sounding_cost(xs)
@@ -477,20 +517,11 @@ class Energy:
                       if 3<=len(xs)<=5 else 0.0)
                    + self.config['sounding_octave_fifth_subset_cost']
                    * octave_fifth_four_subset(tuple(sorted(xs)),self.metric.edo))
-        elif kind=='bass_balance':
-            durations,total,ceiling=data
-            shares={}
-            for pitch,duration in zip(xs,durations):
-                pc=pitch % self.metric.edo
-                shares[pc]=shares.get(pc,0.0)+duration/total
-            value=sum(max(0.0,share-ceiling)**2 for share in shares.values())
         elif kind=='harmonic_realization':
             voices,pcs,root=data
             value=realization_cost(xs,voices,pcs,root,self.metric.edo,
                                    self.config['harmonic_realization'])
-        elif kind in ('background','register','pitch_class_reward'):value=data[xs[0]]
-        else:value=self._motion_value(data,xs)
-        return scale*value
+        return value
 
     def _motion_value_uncached(self,voice,xs):
         return motion_cost(voice,xs[-2] if len(xs)>1 else None,xs[-1],xs[:-1],self.config)
@@ -517,6 +548,31 @@ class Energy:
                 if abs(self.pitch_degree[p]-self.pitch_degree[moves.get(j,self.pitches[j])])>sb.COUNTERPOINT_MAX_JUMP_DEGREES[self.voice[i]]:return False
         return True
 
+    def _build_proposal_masks(self):
+        """Bit intersections replace repeated candidate-by-neighbor scans.
+
+        Bit order is the original sorted domain order, so random choices and
+        their consumption remain identical to the scalar proposal algorithm.
+        """
+        self.proposal_masks={}
+        for i,domain in self.domains.items():
+            bits={p:1<<k for k,p in enumerate(domain)}
+            vertical={}
+            for j in self.neighbors[i]:
+                other=self.domains[j] if j in self.domains else (self.pitches[j],)
+                masks=dict.fromkeys(other,0)
+                for p,allowed in self.compatible[i,j].items():
+                    for q in allowed:masks[q] |= bits[p]
+                vertical[j]=masks
+            max_jump=sb.COUNTERPOINT_MAX_JUMP_DEGREES[self.voice[i]]
+            horizontal={j:{q:sum(bits[p] for p in domain if
+                          abs(self.pitch_degree[p]-self.pitch_degree[q])<=max_jump)
+                           for q in self.domains[j]}
+                        for j in self.horizontal[i]}
+            local={p:sum(bits[q] for q in qs)
+                   for p,qs in self.local_domains[i].items()}
+            self.proposal_masks[i]=((1<<len(domain))-1,local,vertical,horizontal)
+
     def proposal(self,rng,search):
         group=rng.choice(self.groups)
         sizes=[s for s in range(1,len(group)+1) if str(s) in search['move_size_weights']]
@@ -526,22 +582,22 @@ class Energy:
         selected=rng.sample(group,k);pending=set(selected);moves={}
         local=rng.random()<search['local_probability']
         for i in selected:
+            full,near,vertical,horizontal=self.proposal_masks[i]
+            mask=near.get(self.pitches[i],full) if local else full
+            for j,allowed in vertical.items():
+                if j not in pending:
+                    mask &= allowed[moves.get(j,self.pitches[j])]
+                    if not mask:break
+            if mask:
+                for j,allowed in horizontal.items():
+                    mask &= allowed[self.pitches[j]]
+                    if not mask:break
             options=[]
-            candidate_domain=(self.local_domains[i].get(self.pitches[i],self.domains[i])
-                              if local else self.domains[i])
-            for p in candidate_domain:
-                invalid=False
-                for j in self.neighbors[i]:
-                    if (j not in pending and
-                            moves.get(j,self.pitches[j]) not in self.compatible[(i,j)][p]):
-                        invalid=True;break
-                if invalid:continue
-                max_jump=sb.COUNTERPOINT_MAX_JUMP_DEGREES[self.voice[i]]
-                for j in self.horizontal[i]:
-                    if abs(self.pitch_degree[p]-self.pitch_degree[self.pitches[j]])>max_jump:
-                        invalid=True;break
-                if invalid:continue
-                options.append(p)
+            domain=self.domains[i]
+            while mask:
+                bit=mask & -mask
+                options.append(domain[bit.bit_length()-1])
+                mask ^= bit
             if not options:return None
             moves[i]=rng.choice(options);pending.remove(i)
         moves={i:p for i,p in moves.items() if p!=self.pitches[i]}
@@ -554,7 +610,9 @@ class Energy:
         affected=sorted(set().union(*(self.incident[i] for i in moves)))
         old={i:self.pitches[i] for i in moves}
         for i,p in moves.items():self.pitches[i]=p
-        values=[self.evaluate(self.factors[f]) for f in affected]
+        evaluators=getattr(self,'_factor_evaluators',None)
+        values=([evaluators[f](self.pitches) for f in affected] if evaluators is not None
+                else [self.evaluate(self.factors[f]) for f in affected])
         for i,p in old.items():self.pitches[i]=p
         delta=math.fsum(v-self.values[f] for f,v in zip(affected,values))
         return delta,affected,values

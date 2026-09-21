@@ -72,6 +72,24 @@ class SalienceTests(unittest.TestCase):
         self.assertEqual(d['sounding_duration_weighted']['weight'], 2)
         self.assertEqual(d['attack_equal_onset']['count'], 1)
 
+    def test_sparse_reward_matches_full_feature_equation(self):
+        import random
+        rng = random.Random(42)
+        for weights in ({}, {'interval_rewards': {'7/6': .1, '7/5': .1}},
+                        {'weight_5': .3, 'weight_7': .2, 'joint_weight': .4,
+                         'interval_rewards': {'5/4': .2, '7/4': .1}}):
+            m = self.metric(**weights)
+            c = m.config
+            for _ in range(100):
+                pitches = [rng.randrange(-100, 150) for _ in range(rng.randrange(7))]
+                s5, s7, _ = m.features(pitches)
+                directed = sum(c['interval_rewards'][k]*v
+                               for k, v in m.interval_features(pitches).items())
+                for context in ('attack', 'sounding'):
+                    expected = c[context+'_weight']*(directed+c['weight_5']*s5
+                               +c['weight_7']*s7+c['joint_weight']*min(s5, s7))
+                    self.assertEqual(m.reward(pitches, context), expected)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -29,6 +29,8 @@ python3 -m pip install numpy
 
 大音阶第一次运行时可能需要生成数 GB 的光谱与 JI 缓存。构建速度取决于音阶音数、声部音域、CPU 核数和磁盘速度。
 
+旋律前端与退火的性能优化、实测数据和复测命令见 [性能说明](PERFORMANCE_OPTIMIZATION.md)。
+
 ## 快速开始
 
 ### 一键生成

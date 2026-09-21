@@ -5,24 +5,35 @@ import math
 INTERVAL_TARGETS = (.02, .32, .32, .25, .09)
 
 
-def shape_cost(recent, candidate, degree, duration=1.):
+def shape_statistics(recent, degree):
+    """Candidate-independent history, suitable for a scale-local cache."""
+    pitches=list(recent[-25:])
+    degrees=[degree(p) for p in pitches]
+    intervals=[b-a for a,b in zip(degrees,degrees[1:])]
+    counts=[0]*5
+    for d in intervals:counts[min(4,abs(d))]+=1
+    pairs=[(a,b) for a,b in zip(intervals,intervals[1:]) if a and b]
+    turn_rate=(sum(a*b<0 for a,b in pairs)+8*.43)/(len(pairs)+8)
+    return (degrees[-1],len(intervals),tuple(counts),
+            intervals[-1] if intervals else 0,turn_rate)
+
+
+def shape_cost(recent, candidate, degree, duration=1., statistics=None):
     """Smoothed local feedback, not forced intervals or copied source pitches."""
     if not recent:
         return 0.
-    pitches = list(recent[-25:])
-    intervals = [degree(b)-degree(a) for a, b in zip(pitches, pitches[1:])]
-    jump = degree(candidate)-degree(pitches[-1])
+    last,n,counts,previous,turn_rate = (statistics if statistics is not None
+                                       else shape_statistics(recent,degree))
+    jump = degree(candidate)-last
     category = min(4, abs(jump))
     target = INTERVAL_TARGETS[category]
-    observed = (sum(min(4, abs(d))==category for d in intervals)+8*target)/(len(intervals)+8)
+    observed = (counts[category]+8*target)/(n+8)
     cost = observed-target
     # Repeated attacks are rarer in the reference; ties never enter this call.
     if jump == 0:
         cost += .18
-    if intervals and jump and intervals[-1]:
-        pairs = [(a, b) for a, b in zip(intervals, intervals[1:]) if a and b]
-        turn_rate = (sum(a*b<0 for a, b in pairs)+8*.43)/(len(pairs)+8)
-        cost += .35*(turn_rate-.43)*(int(jump*intervals[-1]<0)-.43)
+    if n and jump and previous:
+        cost += .35*(turn_rate-.43)*(int(jump*previous<0)-.43)
     # Rapid ornaments retain the engine's own small-step preference.
     return cost * (.3 if duration <= .250001 else 1.)
 
